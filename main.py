@@ -5,9 +5,6 @@ import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 
-
-keep_alive()
-
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
