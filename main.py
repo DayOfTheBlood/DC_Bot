@@ -106,7 +106,7 @@ def init_channel(channel_id):
     if channel_id not in picks:
         picks[channel_id] = []
     if channel_id not in turns:
-        turns[channel_id] = "A"
+        turns[channel_id] = None
     if channel_id not in formats:
         formats[channel_id] = []
     if channel_id not in tb_mode:
@@ -183,6 +183,8 @@ def announce_next_action(channel_id):
     index = actions_done[channel_id]
 
     if index < len(current_format):
+        if turns[channel_id] not in ["A", "B"]:
+            return "Turn order not set. Use **!first** or **!second**."
         action = current_format[index]
         team = turns[channel_id]
         team_name = team_names[channel_id][team]
@@ -380,7 +382,7 @@ async def reset(ctx):
     init_channel(channel_id)
     bans[channel_id].clear()
     picks[channel_id].clear()
-    turns[channel_id] = "A"
+    turns[channel_id] = None
     formats[channel_id] = []
     tb_mode[channel_id] = "none"
     actions_done[channel_id] = 0
@@ -597,6 +599,9 @@ async def notb(ctx):
         return
     if tb_mode[channel_id] != "none":
         await ctx.send("Tiebreaker already resolved.")
+        return
+    if turns[channel_id] not in ["A", "B"]:
+        await ctx.send("Please use **!first** or **!second** to choose the starting team before continuing.")
         return
 
     tb_mode[channel_id] = "noTB"
