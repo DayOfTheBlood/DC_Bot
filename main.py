@@ -4,6 +4,9 @@ import os
 import asyncio
 import re
 from datetime import datetime, timedelta, timezone
+import json
+import asyncio
+from pathlib import Path
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -96,6 +99,7 @@ EMBED_COLOR = 0x790000
 
 running_timers = {}
 
+STATE_FILE = Path(__file__).with_name("state.json")
 
 def init_channel(channel_id):
     if channel_id not in bans:
@@ -205,10 +209,103 @@ async def send_final_summary(ctx, channel_id):
 
     await ctx.send(embed=embed)
 
+def _collect_channel_ids():
+    # Union aller bekannten Channel-IDs
+    sets = [bans, picks, turns, formats, tb_mode, actions_done, format_type,
+            last_action_team, ban_streak, team_names, coinflip_winner, coinflip_used, tiebreaker_picked]
+    ids = set()
+    for d in sets:
+        ids.update(d.keys())
+    return ids
+
+def get_full_state():
+    """Python-State -> JSON-serialisierbares Dict."""
+    state = {}
+    for cid in _collect_channel_ids():
+        # Sicherstellen, dass Struktur existiert
+        init_channel(cid)
+        state[str(cid)] = {
+            "bans": bans[cid],                         # list[[killer, team], ...]
+            "picks": picks[cid],                       # list[[killer, team], ...]
+            "turns": turns[cid],                       # "A"/"B"
+            "formats": formats[cid],                   # list[str]
+            "tb_mode": tb_mode[cid],                   # "none"|"TB"|"noTB"|"resolved"
+            "actions_done": actions_done[cid],         # int
+            "format_type": format_type[cid],           # "bo3"/"bo5"
+            "last_action_team": last_action_team[cid], # "A"/"B"
+            "ban_streak": ban_streak[cid],             # int
+            "team_names": team_names[cid],             # {"A": "...", "B": "..."}
+            "coinflip_winner": coinflip_winner[cid],   # "A"/"B"/None
+            "coinflip_used": coinflip_used[cid],       # bool
+            "tiebreaker_picked": tiebreaker_picked[cid]# bool
+        }
+    return state
+
+def apply_full_state(data: dict):
+    """JSON-Dict -> Python-State (überschreibt in-memory)."""
+    # Erst alles leeren
+    bans.clear(); picks.clear(); turns.clear(); formats.clear(); tb_mode.clear()
+    actions_done.clear(); format_type.clear(); last_action_team.clear(); ban_streak.clear()
+    team_names.clear(); coinflip_winner.clear(); coinflip_used.clear(); tiebreaker_picked.clear()
+
+    for cid_str, s in data.items():
+        try:
+            cid = int(cid_str)
+        except ValueError:
+            continue
+        init_channel(cid)
+        bans[cid] = [tuple(x) for x in s.get("bans", [])]
+        picks[cid] = [tuple(x) for x in s.get("picks", [])]
+        turns[cid] = s.get("turns", "A")
+        formats[cid] = list(s.get("formats", []))
+        tb_mode[cid] = s.get("tb_mode", "none")
+        actions_done[cid] = int(s.get("actions_done", 0))
+        format_type[cid] = s.get("format_type", "bo3")
+        last_action_team[cid] = s.get("last_action_team", "A")
+        ban_streak[cid] = int(s.get("ban_streak", 0))
+        team_names[cid] = dict(s.get("team_names", {"A": "Team A", "B": "Team B"}))
+        coinflip_winner[cid] = s.get("coinflip_winner", None)
+        coinflip_used[cid] = bool(s.get("coinflip_used", False))
+        tiebreaker_picked[cid] = bool(s.get("tiebreaker_picked", False))
+
+def save_state():
+    """Atomisches Speichern auf Disk."""
+    tmp = STATE_FILE.with_suffix(".json.tmp")
+    data = get_full_state()
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+def load_state_if_exists():
+    if STATE_FILE.exists():
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            apply_full_state(data)
+            print(f"[state] Loaded state from {STATE_FILE}")
+        except Exception as e:
+            print(f"[state] Failed to load state: {e}")
+
+async def autosave_loop():
+    # alle 30s persistieren (unkritisch, leichtgewichtig)
+    while True:
+        try:
+            save_state()
+        except Exception as e:
+            print(f"[state] autosave failed: {e}")
+        await asyncio.sleep(30)
+
 @bot.event
 async def on_ready():
+    load_state_if_exists()
     print(f"Bot is online: {bot.user}")
     await bot.change_presence(activity=discord.Game(name="made by Fluffy"))
+
+@bot.event
+async def on_disconnect():
+    try:
+        save_state()
+        print("[state] saved on disconnect")
+    except Exception as e:
+        print(f"[state] save on disconnect failed: {e}")
 
 @bot.command()
 @has_any_role(ALLOWED_ROLES)
@@ -290,6 +387,7 @@ async def ban(ctx, *, killer):
 
     switch_turn(channel_id)
     await ctx.send(announce_next_action(channel_id))
+    save_state()
 
 @bot.command()
 async def pick(ctx, *, killer):
@@ -371,6 +469,7 @@ async def pick(ctx, *, killer):
 
     switch_turn(channel_id)
     await ctx.send(announce_next_action(channel_id))
+    save_state()
 
 @bot.command()
 @has_any_role(STAFF_ROLES)
@@ -390,6 +489,7 @@ async def reset(ctx):
     coinflip_winner[channel_id] = None
     coinflip_used[channel_id] = False
     await ctx.send("Reset complete.")
+    save_state()
 
 @bot.command()
 @has_any_role(STAFF_ROLES)
@@ -425,6 +525,7 @@ async def bo3(ctx):
                       "+ Agreeing on TB / 1 ban each until last killer left\n"
                       "```")
     await ctx.send(format_message)
+    save_state()
 
 @bot.command()
 @has_any_role(STAFF_ROLES)
@@ -459,6 +560,7 @@ async def bo5(ctx):
                       "+ Agreeing on TB / 1 ban each until last killer left\n"
                       "```")
     await ctx.send(format_message)
+    save_state()
 
 @bot.command()
 @has_any_role(STAFF_ROLES)
@@ -494,9 +596,8 @@ async def coinflip(ctx, *, text: str):
     coinflip_winner[channel_id] = secrets.choice(["A", "B"])
     coinflip_used[channel_id] = True
 
-    await ctx.send(
-        f"Coinflip result: **{team_names[channel_id][coinflip_winner[channel_id]]}** won the toss. Use **!first** or **!second** to choose turn order."
-    )
+    await ctx.send(f"Coinflip result: **{team_names[channel_id][coinflip_winner[channel_id]]}** won the toss. Use **!first** or **!second** to choose turn order.")
+    save_state()
 
 @bot.command()
 async def first(ctx):
@@ -522,6 +623,7 @@ async def first(ctx):
                           description="\n".join(killer_pool),
                           color=EMBED_COLOR)
     await ctx.send(embed=embed)
+    save_state()
 
 @bot.command()
 async def second(ctx):
@@ -547,6 +649,7 @@ async def second(ctx):
                           description="\n".join(killer_pool),
                           color=EMBED_COLOR)
     await ctx.send(embed=embed)
+    save_state()
 
 @bot.command()
 async def tb(ctx, *, killer):
@@ -581,6 +684,7 @@ async def tb(ctx, *, killer):
     await send_final_summary(ctx, channel_id)
 
     await ctx.send("Format completed. **GLHF with your Matches**.")
+    save_state()
 
 @bot.command()
 async def notb(ctx):
@@ -613,8 +717,8 @@ async def notb(ctx):
         await ctx.send("noTB mode activated. No killers left.")
 
     await ctx.send(
-        f"Next action: **BAN** by {team_names[channel_id][turns[channel_id]]}."
-    )
+        f"Next action: **BAN** by {team_names[channel_id][turns[channel_id]]}.")
+    save_state()
 
 @bot.command()
 @has_any_role(STAFF_ROLES)
