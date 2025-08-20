@@ -939,6 +939,9 @@ async def killer(ctx):
          ),
         color=EMBED_COLOR)
     await ctx.send(embed=embed)
+    seconds = 5 * 60
+    label = human_label_from_seconds_en(seconds)
+    asyncio.create_task(_run_timer_seconds(ctx, seconds, label))
 
 @bot.command()
 async def survivor(ctx):
@@ -949,6 +952,9 @@ async def survivor(ctx):
          ),
         color=EMBED_COLOR)
     await ctx.send(embed=embed)
+    seconds = 5 * 60
+    label = human_label_from_seconds_en(seconds)
+    asyncio.create_task(_run_timer_seconds(ctx, seconds, label))
 
 def parse_duration_to_seconds(spec: str) -> int | None:
     """
