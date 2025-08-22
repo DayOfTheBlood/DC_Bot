@@ -49,11 +49,6 @@ KILLER_ALIASES = {
     "springtrap": "Animatronic"
 }
 
-ALLOWED_KILLER_KEYS = {
-    normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
-}
-
-
 killer_pool_raw = '''
 Animatronic
 Artist
@@ -106,6 +101,10 @@ EMBED_COLOR = 0x790000
 running_timers = {}
 
 STATE_FILE = Path(__file__).with_name("state.json")
+
+ALLOWED_KILLER_KEYS = {
+    normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
+}
 
 def has_any_role(allowed_roles):
 
