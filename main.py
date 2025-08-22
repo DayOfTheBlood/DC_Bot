@@ -970,6 +970,7 @@ async def allcommands(ctx):
     embed.add_field(name="!tb", value="Picks the Tiebreaker and ends the Phase", inline=False)
     embed.add_field(name="!notb", value="Sets the Phase to ban until last Killer", inline=False)
     embed.add_field(name="!timer <duration>", value="Starts a timer. Accepts minutes (number), seconds (…s), or combos like 1m30s.", inline=False)
+    embed.add_field(name="!<killername>", value="Shows the balancing of the killer if they are in the pool", inline=False)
 
     await ctx.send(embed=embed)
 
@@ -992,6 +993,7 @@ async def staffcommands(ctx):
     embed.add_field(name="~!tb", value="Picks the Tiebreaker and ends the Phase", inline=False)
     embed.add_field(name="~!notb", value="Sets the Phase to ban until last Killer", inline=False)
     embed.add_field(name="~!timer <duration>", value="Starts a timer. Accepts minutes (number), seconds (…s), or combos like 1m30s.", inline=False)
+    embed.add_field(name="~!<killername>", value="Shows the balancing of the killer if they are in the pool", inline=False)
     embed.add_field(name="!bo3", value="Sets the pick & ban phase to Best of 3 format.", inline=False)
     embed.add_field(name="!bo5", value="Sets the pick & ban phase to Best of 5 format.", inline=False)
     embed.add_field(name="!coinflip <Team A> <Team B>", value="Randomly assigns teams A/B and determines coinflip winner.", inline=False)
