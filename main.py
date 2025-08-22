@@ -124,7 +124,7 @@ def has_any_role(allowed_roles):
     return commands.check(predicate)
 
 
-DEFAULT_FORUM_CHANNEL_ID = 123456789012345678
+DEFAULT_FORUM_CHANNEL_ID = 1401038120916357140
 
 KILLER_FORUM_OVERRIDES: dict[str, int] = {
     #für override
