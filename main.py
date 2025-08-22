@@ -80,6 +80,12 @@ Wraith
 ALLOWED_ROLES = ["Head of Production", "Admin", "Head of Staff"]
 STAFF_ROLES = ["Staff", "Head of Production", "Admin", "Head of Staff"]
 
+def normalize_killer_name(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9]", "", raw.lower())
+    if s in KILLER_ALIASES:
+        return KILLER_ALIASES[s]
+    return raw.strip().title()
+
 killer_pool = sorted(killer_pool_raw.strip().splitlines())
 
 bans = {}
@@ -114,11 +120,6 @@ def has_any_role(allowed_roles):
 
     return commands.check(predicate)
 
-def normalize_killer_name(raw: str) -> str:
-    s = re.sub(r"[^a-z0-9]", "", raw.lower())
-    if s in KILLER_ALIASES:
-        return KILLER_ALIASES[s]
-    return raw.strip().title()
 
 DEFAULT_FORUM_CHANNEL_ID = 123456789012345678
 
@@ -128,13 +129,6 @@ KILLER_FORUM_OVERRIDES: dict[str, int] = {
 
 def normalize_key(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
-
-def normalize_killer_name(raw: str) -> str:
-    key = normalize_key(raw)
-    if key in KILLER_ALIASES:
-        return KILLER_ALIASES[key]
-    return raw.strip().title()
-
 
 def init_channel(channel_id):
     if channel_id not in bans:
