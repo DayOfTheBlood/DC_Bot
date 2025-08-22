@@ -13,6 +13,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 killer_map_lookup = {
+    "Animatronic": "Lery's Memorial Institute",
     "Blight": "Blood Lodge",
     "Hillbilly": "Blood Lodge",
     "Nurse": "Groaning Storehouse 2",
@@ -31,7 +32,6 @@ killer_map_lookup = {
     "Nightmare": "Wretched Shop",
     "Oni": "Wretched Shop",
     "Plague": "Family Residence 2",
-    "Springtrap": "Lery's Memorial Institute",
     "Unknown": "Family Residence 2",
     "Lich": "Grim Pantry",
     "Dredge": "Midwich Elementary School",
@@ -40,7 +40,29 @@ killer_map_lookup = {
     "Wraith": "Hawkins Lab"
 }
 
+KILLER_ALIASES = {
+    "Ghostface": "Ghost Face",
+    "Goodguy": "Good Guy",
+    "chucky": "Good Guy",
+    "Wesker": "Mastermind",
+    "Dracula": "Dark Lord",
+    "Springtrap": "Animatronic"
+}
+
+def normalize_killer_name(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9]", "", raw.lower())
+    if s in KILLER_ALIASES:
+        return KILLER_ALIASES[s]
+    return raw.strip().title()
+
+DEFAULT_FORUM_CHANNEL_ID = 123456789012345678
+
+KILLER_FORUM_OVERRIDES: dict[str, int] = {
+    #für override
+}
+
 killer_pool_raw = '''
+Animatronic
 Artist
 Blight
 Clown
@@ -63,7 +85,6 @@ Oni
 Plague
 Singularity
 Spirit
-Springtrap
 Unknown
 Wraith
 '''
@@ -292,6 +313,59 @@ async def autosave_loop():
         except Exception as e:
             print(f"[state] autosave failed: {e}")
         await asyncio.sleep(30)
+
+def _truncate_for_embed(text: str, limit: int = 4096):
+    import io
+    if len(text) <= limit:
+        return text, None
+    head = text[:limit - 10].rstrip()
+    leftover = text[len(head):]
+    bio = io.BytesIO(leftover.encode("utf-8"))
+    bio.name = "message_overflow.txt"
+    return head + "\n… (gekürzt, kompletter Text als Anhang)", bio
+
+def _first_image_attachment(msg: discord.Message):
+    for a in msg.attachments:
+        if (a.content_type and a.content_type.startswith("image/")) or a.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+            return a
+    return None
+
+def _attachment_list(msg: discord.Message):
+    return [f"[{a.filename}]({a.url})" for a in msg.attachments]
+
+async def _get_forum_channel(guild: discord.Guild, killer: str) -> discord.ForumChannel | None:
+    chan_id = KILLER_FORUM_OVERRIDES.get(killer, DEFAULT_FORUM_CHANNEL_ID)
+    ch = guild.get_channel(chan_id) or await guild.fetch_channel(chan_id)
+    return ch if isinstance(ch, discord.ForumChannel) else None
+
+async def _find_thread_by_name(forum: discord.ForumChannel, title: str) -> discord.Thread | None:
+    # 1) aktive Threads
+    for th in forum.threads:
+        if th.name.strip().lower() == title.strip().lower():
+            return th
+    # 2) archivierte Threads (öffentlich)
+    try:
+        archived = await forum.fetch_archived_threads(private=False, limit=100)
+        for th in archived.threads:
+            if th.name.strip().lower() == title.strip().lower():
+                return th
+    except Exception:
+        pass
+    # Optional: private archivierte Threads (falls verwendet und Rechte vorhanden)
+    try:
+        archived_private = await forum.fetch_archived_threads(private=True, limit=100)
+        for th in archived_private.threads:
+            if th.name.strip().lower() == title.strip().lower():
+                return th
+    except Exception:
+        pass
+    return None
+
+async def _get_second_message(thread: discord.Thread) -> discord.Message | None:
+    msgs = []
+    async for m in thread.history(limit=2, oldest_first=True):
+        msgs.append(m)
+    return msgs[1] if len(msgs) >= 2 else None
 
 @bot.event
 async def on_ready():
@@ -1052,6 +1126,70 @@ async def timer(ctx, *, amount: str | None = None):
 
     label = human_label_from_seconds_en(seconds)
     asyncio.create_task(_run_timer_seconds(ctx, seconds, label))
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    content = message.content.strip()
+    if content.startswith("!"):
+        raw = content[1:].strip()
+        killer = normalize_killer_name(raw)
+
+        # Ist es ein gültiger Killer?
+        if killer in killer_pool or killer in killer_map_lookup:
+            # Forum holen
+            if message.guild is None:
+                await message.channel.send("Dieser Befehl funktioniert nur auf einem Server.")
+                return
+            forum = await _get_forum_channel(message.guild, killer)
+            if not forum:
+                await message.channel.send("Forum-Channel nicht gefunden oder keine Rechte.")
+                return
+
+            # Thread suchen
+            thread = await _find_thread_by_name(forum, killer)
+            if not thread:
+                await message.channel.send(f"Kein Thread mit dem Namen **{killer}** im Forum gefunden.")
+                return
+
+            # 2. Nachricht holen
+            second = await _get_second_message(thread)
+            if not second:
+                await message.channel.send("In diesem Thread gibt es keine zweite Nachricht.")
+                return
+
+            # Embed bauen
+            text = second.clean_content or "*Kein Textinhalt*"
+            desc, overflow = _truncate_for_embed(text)
+
+            embed = discord.Embed(
+                title=f"{killer} – 2. Nachricht aus #{thread.name}",
+                description=desc,
+                color=EMBED_COLOR,
+                timestamp=second.created_at
+            )
+            embed.set_author(name=second.author.display_name, icon_url=second.author.display_avatar.url)
+            embed.add_field(name="Zum Original", value=f"[Hier klicken]({second.jump_url})", inline=False)
+
+            img = _first_image_attachment(second)
+            if img:
+                embed.set_image(url=img.url)
+
+            atts = _attachment_list(second)
+            if atts:
+                embed.add_field(name="Anhänge", value="\n".join(atts), inline=False)
+
+            files = []
+            if overflow:
+                files.append(discord.File(overflow, filename=overflow.name))
+
+            await message.channel.send(embed=embed, files=files)
+            return
+
+    # normale Commands weiter erlauben
+    await bot.process_commands(message)
 
 token = os.getenv("TOKEN")
 if token is None:
