@@ -1196,13 +1196,12 @@ async def on_message(message):
             desc, overflow = _truncate_for_embed(text)
 
             embed = discord.Embed(
-                title=f"{killer_canonical} – 2. Nachricht aus #{thread.name}",
                 description=desc,
                 color=EMBED_COLOR,
                 timestamp=second.created_at
             )
             embed.set_author(name=second.author.display_name, icon_url=second.author.display_avatar.url)
-            embed.add_field(name="Zum Original", value=f"[Hier klicken]({second.jump_url})", inline=False)
+            embed.add_field(value=f"[Original]({second.jump_url})", inline=False)
 
             img = _first_image_attachment(second)
             if img:
