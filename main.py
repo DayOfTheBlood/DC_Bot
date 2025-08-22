@@ -1184,12 +1184,12 @@ async def on_message(message):
 
             thread = await _find_thread_by_name(forum, killer_canonical)
             if not thread:
-                await message.channel.send(f"Kein Thread mit dem Namen **{killer_canonical}** im Forum gefunden.")
+                await message.channel.send(f"There is no thread that includes **{killer_canonical}**.")
                 return
 
             second = await _get_second_message(thread)
             if not second:
-                await message.channel.send("In diesem Thread gibt es keine zweite Nachricht.")
+                await message.channel.send("No Messages in that Channel.")
                 return
 
             text = second.clean_content or "*Kein Textinhalt*"
@@ -1198,7 +1198,6 @@ async def on_message(message):
             embed = discord.Embed(
                 description=desc,
                 color=EMBED_COLOR,
-                timestamp=second.created_at
             )
             embed.set_author(name=second.author.display_name, icon_url=second.author.display_avatar.url)
             embed.add_field(name="", value=f"[Original]({second.jump_url})", inline=False)
