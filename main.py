@@ -41,25 +41,18 @@ killer_map_lookup = {
 }
 
 KILLER_ALIASES = {
-    "Ghostface": "Ghost Face",
-    "Goodguy": "Good Guy",
+    "ghostface": "Ghost Face",
+    "goodguy": "Good Guy",
     "chucky": "Good Guy",
-    "Wesker": "Mastermind",
-    "Dracula": "Dark Lord",
-    "Springtrap": "Animatronic"
+    "wesker": "Mastermind",
+    "dracula": "Dark Lord",
+    "springtrap": "Animatronic"
 }
 
-def normalize_killer_name(raw: str) -> str:
-    s = re.sub(r"[^a-z0-9]", "", raw.lower())
-    if s in KILLER_ALIASES:
-        return KILLER_ALIASES[s]
-    return raw.strip().title()
-
-DEFAULT_FORUM_CHANNEL_ID = 123456789012345678
-
-KILLER_FORUM_OVERRIDES: dict[str, int] = {
-    #für override
+ALLOWED_KILLER_KEYS = {
+    normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
+
 
 killer_pool_raw = '''
 Animatronic
@@ -92,14 +85,6 @@ Wraith
 ALLOWED_ROLES = ["Head of Production", "Admin", "Head of Staff"]
 STAFF_ROLES = ["Staff", "Head of Production", "Admin", "Head of Staff"]
 
-def has_any_role(allowed_roles):
-
-    async def predicate(ctx):
-        user_roles = [role.name for role in ctx.author.roles]
-        return any(role in user_roles for role in allowed_roles)
-
-    return commands.check(predicate)
-
 killer_pool = sorted(killer_pool_raw.strip().splitlines())
 
 bans = {}
@@ -121,6 +106,36 @@ EMBED_COLOR = 0x790000
 running_timers = {}
 
 STATE_FILE = Path(__file__).with_name("state.json")
+
+def has_any_role(allowed_roles):
+
+    async def predicate(ctx):
+        user_roles = [role.name for role in ctx.author.roles]
+        return any(role in user_roles for role in allowed_roles)
+
+    return commands.check(predicate)
+
+def normalize_killer_name(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9]", "", raw.lower())
+    if s in KILLER_ALIASES:
+        return KILLER_ALIASES[s]
+    return raw.strip().title()
+
+DEFAULT_FORUM_CHANNEL_ID = 123456789012345678
+
+KILLER_FORUM_OVERRIDES: dict[str, int] = {
+    #für override
+}
+
+def normalize_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def normalize_killer_name(raw: str) -> str:
+    key = normalize_key(raw)
+    if key in KILLER_ALIASES:
+        return KILLER_ALIASES[key]
+    return raw.strip().title()
+
 
 def init_channel(channel_id):
     if channel_id not in bans:
@@ -339,26 +354,46 @@ async def _get_forum_channel(guild: discord.Guild, killer: str) -> discord.Forum
     return ch if isinstance(ch, discord.ForumChannel) else None
 
 async def _find_thread_by_name(forum: discord.ForumChannel, title: str) -> discord.Thread | None:
-    # 1) aktive Threads
+    needle = normalize_key(title)
+
+    # aktive Threads
     for th in forum.threads:
-        if th.name.strip().lower() == title.strip().lower():
+        name_key = normalize_key(th.name)
+        if name_key == needle:
             return th
-    # 2) archivierte Threads (öffentlich)
+    for th in forum.threads:
+        name_key = normalize_key(th.name)
+        if name_key.startswith(needle) or needle.startswith(name_key):
+            return th
+
+    # archivierte (öffentlich)
     try:
         archived = await forum.fetch_archived_threads(private=False, limit=100)
         for th in archived.threads:
-            if th.name.strip().lower() == title.strip().lower():
+            name_key = normalize_key(th.name)
+            if name_key == needle:
+                return th
+        for th in archived.threads:
+            name_key = normalize_key(th.name)
+            if name_key.startswith(needle) or needle.startswith(name_key):
                 return th
     except Exception:
         pass
-    # Optional: private archivierte Threads (falls verwendet und Rechte vorhanden)
+
+    # archivierte (privat), falls Berechtigungen
     try:
         archived_private = await forum.fetch_archived_threads(private=True, limit=100)
         for th in archived_private.threads:
-            if th.name.strip().lower() == title.strip().lower():
+            name_key = normalize_key(th.name)
+            if name_key == needle:
+                return th
+        for th in archived_private.threads:
+            name_key = normalize_key(th.name)
+            if name_key.startswith(needle) or needle.startswith(name_key):
                 return th
     except Exception:
         pass
+
     return None
 
 async def _get_second_message(thread: discord.Thread) -> discord.Message | None:
@@ -1135,37 +1170,40 @@ async def on_message(message):
     content = message.content.strip()
     if content.startswith("!"):
         raw = content[1:].strip()
-        killer = normalize_killer_name(raw)
+        killer_canonical = normalize_killer_name(raw)
+        killer_key = normalize_key(killer_canonical)
 
-        # Ist es ein gültiger Killer?
-        if killer in killer_pool or killer in killer_map_lookup:
-            # Forum holen
+        # Ist es ein gültiger Killer (nach Key)?
+        if killer_key in ALLOWED_KILLER_KEYS:
             if message.guild is None:
                 await message.channel.send("Dieser Befehl funktioniert nur auf einem Server.")
                 return
-            forum = await _get_forum_channel(message.guild, killer)
+
+            # 0) Sicherstellen, dass Forum-ID gesetzt ist
+            if DEFAULT_FORUM_CHANNEL_ID == 123456789012345678:
+                await message.channel.send("DEFAULT_FORUM_CHANNEL_ID ist nicht konfiguriert.")
+                return
+
+            forum = await _get_forum_channel(message.guild, killer_canonical)
             if not forum:
                 await message.channel.send("Forum-Channel nicht gefunden oder keine Rechte.")
                 return
 
-            # Thread suchen
-            thread = await _find_thread_by_name(forum, killer)
+            thread = await _find_thread_by_name(forum, killer_canonical)
             if not thread:
-                await message.channel.send(f"Kein Thread mit dem Namen **{killer}** im Forum gefunden.")
+                await message.channel.send(f"Kein Thread mit dem Namen **{killer_canonical}** im Forum gefunden.")
                 return
 
-            # 2. Nachricht holen
             second = await _get_second_message(thread)
             if not second:
                 await message.channel.send("In diesem Thread gibt es keine zweite Nachricht.")
                 return
 
-            # Embed bauen
             text = second.clean_content or "*Kein Textinhalt*"
             desc, overflow = _truncate_for_embed(text)
 
             embed = discord.Embed(
-                title=f"{killer} – 2. Nachricht aus #{thread.name}",
+                title=f"{killer_canonical} – 2. Nachricht aus #{thread.name}",
                 description=desc,
                 color=EMBED_COLOR,
                 timestamp=second.created_at
@@ -1188,7 +1226,6 @@ async def on_message(message):
             await message.channel.send(embed=embed, files=files)
             return
 
-    # normale Commands weiter erlauben
     await bot.process_commands(message)
 
 token = os.getenv("TOKEN")
