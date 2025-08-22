@@ -1201,7 +1201,7 @@ async def on_message(message):
                 timestamp=second.created_at
             )
             embed.set_author(name=second.author.display_name, icon_url=second.author.display_avatar.url)
-            embed.add_field(value=f"[Original]({second.jump_url})", inline=False)
+            embed.add_field(name="", value=f"[Original]({second.jump_url})", inline=False)
 
             img = _first_image_attachment(second)
             if img:
