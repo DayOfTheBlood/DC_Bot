@@ -1475,6 +1475,7 @@ def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
     picks_text = "\n".join([f"{k} ({team_names[channel_id].get(t, t)}) – {killer_map_lookup.get(k, '—')}" for k, t in picks[channel_id]]) or "—"
 
     emb.add_field(name="Bans", value=bans_text, inline=True)
+    emb.add_field(name="\u200b", value="\u200b", inline=True)
     emb.add_field(name="Picks", value=picks_text, inline=True)
 
     na = announce_next_action(channel_id)
