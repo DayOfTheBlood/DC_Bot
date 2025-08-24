@@ -104,6 +104,7 @@ team_names = {}
 coinflip_winner = {}
 coinflip_used = {}
 tiebreaker_picked = {}
+action_log: dict[int, list[str]] = {}
 
 EMBED_COLOR = 0x790000
 
@@ -131,6 +132,8 @@ KILLER_FORUM_OVERRIDES: dict[str, int] = {
 }
 
 def init_channel(channel_id):
+    if channel_id not in action_log:
+        action_log[channel_id] = []
     if channel_id not in bans:
         bans[channel_id] = []
     if channel_id not in picks:
@@ -254,19 +257,20 @@ def get_full_state():
         # Sicherstellen, dass Struktur existiert
         init_channel(cid)
         state[str(cid)] = {
-            "bans": bans[cid],                         # list[[killer, team], ...]
-            "picks": picks[cid],                       # list[[killer, team], ...]
-            "turns": turns[cid],                       # "A"/"B"
-            "formats": formats[cid],                   # list[str]
-            "tb_mode": tb_mode[cid],                   # "none"|"TB"|"noTB"|"resolved"
-            "actions_done": actions_done[cid],         # int
-            "format_type": format_type[cid],           # "bo3"/"bo5"
-            "last_action_team": last_action_team[cid], # "A"/"B"
-            "ban_streak": ban_streak[cid],             # int
-            "team_names": team_names[cid],             # {"A": "...", "B": "..."}
-            "coinflip_winner": coinflip_winner[cid],   # "A"/"B"/None
-            "coinflip_used": coinflip_used[cid],       # bool
-            "tiebreaker_picked": tiebreaker_picked[cid]# bool
+            "action_log": action_log[cid],
+            "bans": bans[cid],                        
+            "picks": picks[cid],                      
+            "turns": turns[cid],                       
+            "formats": formats[cid],                   
+            "tb_mode": tb_mode[cid],                   
+            "actions_done": actions_done[cid],         
+            "format_type": format_type[cid],           
+            "last_action_team": last_action_team[cid], 
+            "ban_streak": ban_streak[cid],             
+            "team_names": team_names[cid],             
+            "coinflip_winner": coinflip_winner[cid],   
+            "coinflip_used": coinflip_used[cid],       
+            "tiebreaker_picked": tiebreaker_picked[cid]
         }
     return state
 
@@ -283,6 +287,7 @@ def apply_full_state(data: dict):
         except ValueError:
             continue
         init_channel(cid)
+        action_log[cid] = list(s.get("action_log", []))
         bans[cid] = [tuple(x) for x in s.get("bans", [])]
         picks[cid] = [tuple(x) for x in s.get("picks", [])]
         turns[cid] = s.get("turns", "A")
@@ -576,6 +581,7 @@ async def pick(ctx, *, killer):
 @bot.command()
 @has_any_role(STAFF_ROLES)
 async def reset(ctx):
+    action_log[channel_id] = []
     channel_id = ctx.channel.id
     init_channel(channel_id)
     bans[channel_id].clear()
