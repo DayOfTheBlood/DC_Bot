@@ -833,8 +833,8 @@ async def fluffy(ctx):
     embed = discord.Embed(title="Fluffy's Streamer ID",
                           color=EMBED_COLOR,
                           description="Streamer for your matches, please add:")
-    embed.add_field(name="Steam ID",
-                    value=f"[{steam_id}]({steam_profile_url})",
+    embed.add_field(name="Epic ID",
+                    value=f"FluffyTailedHog",
                     inline=False)
 
     embed.add_field(name="DBD ID", value=dbd_name, inline=False)
