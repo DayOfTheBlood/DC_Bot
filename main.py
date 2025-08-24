@@ -1473,6 +1473,46 @@ async def _apply_undo(ctx, channel_id: int) -> str:
     save_state()
     return "Last action has been undone."
 
+async def _apply_tb(ctx, channel_id: int, killer: str) -> str:
+    if not formats[channel_id]:
+        return "Please select a format first."
+    if actions_done[channel_id] < len(formats[channel_id]):
+        return "The pick & ban phase is not finished yet."
+    if tb_mode[channel_id] != "none":
+        return "Tiebreaker has already been decided."
+    if killer not in killer_pool:
+        return f"{killer} is not a valid killer."
+    if any(k == killer for k, _ in bans[channel_id]) or any(k == killer for k, _ in picks[channel_id]):
+        return f"{killer} has already been banned or picked."
+
+    picks[channel_id].append((killer, "Tiebreaker"))
+    tb_mode[channel_id] = "TB"
+    # falls du action_log nutzt:
+    if 'action_log' in globals():
+        action_log[channel_id].append(f"TB — {killer}")
+
+    save_state()
+    # Wenn du den Channel clean halten willst, kannst du die nächste Zeile auskommentieren:
+    await send_final_summary(ctx, channel_id)
+    return f"Tiebreaker picked: **{killer}**"
+
+async def _apply_notb(ctx, channel_id: int) -> str:
+    if not formats[channel_id]:
+        return "Please select a format first."
+    if actions_done[channel_id] < len(formats[channel_id]):
+        return "The pick & ban phase is not finished yet."
+    if tb_mode[channel_id] != "none":
+        return "Tiebreaker already resolved."
+
+    if turns[channel_id] not in ["A", "B"]:
+        return "Please choose the starting team with **!first** or **!second** before continuing."
+
+    tb_mode[channel_id] = "noTB"
+    if 'action_log' in globals():
+        action_log[channel_id].append("noTB — continue banning until one remains")
+    save_state()
+    return "noTB mode activated. Continue banning until only one killer remains."
+
 def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
     emb = discord.Embed(
         title="Match Draft Board",
@@ -1484,6 +1524,13 @@ def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
 
     emb.add_field(name="Bans", value=bans_text, inline=True)
     emb.add_field(name="Picks", value=picks_text, inline=True)
+
+    tb_killer = next((k for k, t in picks[channel_id] if t == "Tiebreaker"), None)
+        if tb_mode.get(channel_id) == "TB":
+            emb.add_field(name="Tiebreaker", value=tb_killer or "—", inline=False)
+        elif actions_done[channel_id] >= len(formats[channel_id]) and tb_mode.get(channel_id) == "none":
+            emb.add_field(name="Tiebreaker", value="Not decided — use the buttons below.", inline=False)
+
     recent = "\n".join(action_log[channel_id][-3:]) or "—"
     emb.add_field(name="Recent", value=recent, inline=False)
 
@@ -1593,6 +1640,41 @@ class DraftBoardView(discord.ui.View):
         v = discord.ui.View(timeout=60)
         v.add_item(PickSelect(cid))
         await interaction.response.send_message("Select PICK:", view=v, ephemeral=True)
+
+    @discord.ui.button(label="Set TB", style=discord.ButtonStyle.primary)
+    async def btn_tb(self, interaction: discord.Interaction, button: discord.ui.Button):
+    cid = self.channel_id
+    if not await self._ensure_prereqs(interaction):
+        return
+    if actions_done[cid] < len(formats[cid]):
+        await interaction.response.send_message("The pick & ban phase is not finished yet.", ephemeral=True)
+        return
+    if tb_mode.get(cid) != "none":
+        await interaction.response.send_message("Tiebreaker already resolved.", ephemeral=True)
+        return
+
+    opts = _remaining_killers(cid)
+    if not opts:
+        await interaction.response.send_message("No killers remaining.", ephemeral=True)
+        return
+
+    class TBSelect(discord.ui.Select):
+        def __init__(self, channel_id: int):
+            options = [discord.SelectOption(label=k, value=k) for k in opts[:25]]
+            super().__init__(placeholder="Choose a Tiebreaker…", min_values=1, max_values=1, options=options)
+            self.channel_id = channel_id
+
+        async def callback(self, inter: discord.Interaction):
+            killer = self.values[0]
+            async with _lock_for_channel(self.channel_id):
+                msg = await _apply_tb(inter, self.channel_id, killer)
+                await _update_or_create_board(inter.channel, force_existing=True)
+                # Menü wegräumen + kurze Bestätigung nur für den Nutzer
+                await inter.response.edit_message(content="TB applied ✅", view=None)
+
+    v = discord.ui.View(timeout=60)
+    v.add_item(TBSelect(cid))
+    await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
 
     @discord.ui.button(label="Undo", style=discord.ButtonStyle.secondary)
     async def btn_undo(self, interaction: discord.Interaction, button: discord.ui.Button):
