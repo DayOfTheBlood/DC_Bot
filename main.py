@@ -91,6 +91,7 @@ def normalize_killer_name(raw: str) -> str:
 
 killer_pool = sorted(killer_pool_raw.strip().splitlines())
 
+action_log: dict[int, list[str]] = {}
 bans = {}
 picks = {}
 turns = {}
@@ -104,7 +105,6 @@ team_names = {}
 coinflip_winner = {}
 coinflip_used = {}
 tiebreaker_picked = {}
-action_log: dict[int, list[str]] = {}
 
 EMBED_COLOR = 0x790000
 
@@ -1363,14 +1363,15 @@ async def _apply_ban(ctx, channel_id: int, killer: str) -> str:
     team = turns[channel_id]
     bans[channel_id].append((killer, team))
     actions_done[channel_id] += 1
+    action_log[channel_id].append(f"BAN — {killer} by {team_names[channel_id][turns[channel_id]]}")
 
-    # noTB special-case: auto-pick final TB when only 1 remains
     if tb_mode[channel_id] == "noTB":
         remaining = _remaining_killers(channel_id)
         if len(remaining) == 1:
             last_killer = remaining[0]
             picks[channel_id].append((last_killer, "Tiebreaker"))
             tb_mode[channel_id] = "resolved"
+            action_log[channel_id].append(f"TB — {last_killer} auto-selected")
             await send_final_summary(ctx, channel_id)
 
     # turn switching like your switch_turn
@@ -1418,6 +1419,7 @@ async def _apply_pick(ctx, channel_id: int, killer: str) -> str:
     team = turns[channel_id]
     picks[channel_id].append((killer, team))
     actions_done[channel_id] += 1
+    action_log[channel_id].append(f"PICK — {killer} by {team_names[channel_id][turns[channel_id]]}")
 
     # turn switching (same as above)
     if tb_mode[channel_id] == "noTB":
@@ -1482,6 +1484,8 @@ def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
 
     emb.add_field(name="Bans", value=bans_text, inline=True)
     emb.add_field(name="Picks", value=picks_text, inline=True)
+    recent = "\n".join(action_log[channel_id][-3:]) or "—"
+    emb.add_field(name="Recent", value=recent, inline=False)
 
     na = announce_next_action(channel_id)
     if na:
