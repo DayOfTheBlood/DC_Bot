@@ -36,12 +36,12 @@ killer_map_lookup = {
     "Lich": "Grim Pantry",
     "Dredge": "Midwich Elementary School",
     "Doctor": "Wreckers Yard",
-    "Ghost Face": "Lery's Memorial Institute",
+    "Ghostface": "Lery's Memorial Institute",
     "Wraith": "Hawkins Lab"
 }
 
 KILLER_ALIASES = {
-    "ghostface": "Ghost Face",
+    "ghost face": "Ghostface",
     "goodguy": "Good Guy",
     "chucky": "Good Guy",
     "wesker": "Mastermind",
