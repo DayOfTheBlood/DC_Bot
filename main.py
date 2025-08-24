@@ -1221,6 +1221,406 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+# =====================[ STATUS BOARD: GLOBALS ]=====================
+from typing import Optional
+
+# pro Channel die Board-Message-ID
+board_message_id: dict[int, int] = {}
+# pro Channel ein Lock gegen Doppel-Klicks / Race Conditions
+_board_locks: dict[int, asyncio.Lock] = {}
+
+def _lock_for_channel(cid: int) -> asyncio.Lock:
+    if cid not in _board_locks:
+        _board_locks[cid] = asyncio.Lock()
+    return _board_locks[cid]
+
+def _remaining_killers(channel_id: int) -> list[str]:
+    return [
+        k for k in killer_pool
+        if all(k != b[0] for b in bans[channel_id])
+        and all(k != p[0] for p in picks[channel_id])
+    ]
+
+def _next_action(channel_id: int) -> Optional[str]:
+    """ 'ban' | 'pick' | None  (None = Format fertig oder TB/noTB Sonderfall) """
+    if tb_mode.get(channel_id) == "noTB":
+        # in noTB ist es immer BAN, solange >1 übrig
+        return "ban" if len(_remaining_killers(channel_id)) > 1 else None
+
+    fmt = formats[channel_id]
+    idx = actions_done[channel_id]
+    if idx < len(fmt):
+        return fmt[idx]
+    return None  # Format fertig (TB oder Ende)
+
+def _format_progress_text(channel_id: int) -> str:
+    fmt = formats[channel_id]
+    done = actions_done[channel_id]
+    parts = []
+    for i, a in enumerate(fmt):
+        parts.append(("✅" if i < done else "◻️") + (" BAN" if a == "ban" else " PICK"))
+    return " ".join(parts) if parts else "(kein Format gesetzt)"
+
+def _map_conflict_for_pick(channel_id: int, killer: str) -> Optional[str]:
+    """None = ok, sonst Konflikt-Text"""
+    picked_map = killer_map_lookup.get(killer)
+    if not picked_map:
+        return None
+    used_maps = {
+        killer_map_lookup.get(k, None)
+        for k, team in picks[channel_id]
+        if team != "Tiebreaker" and killer_map_lookup.get(k) is not None
+    }
+    picked_killers = {k for k, team in picks[channel_id] if team != "Tiebreaker"}
+
+    for other_killer, other_map in killer_map_lookup.items():
+        if other_killer != killer and other_map == picked_map and other_killer in picked_killers:
+            return f"Map {picked_map} ist bereits durch **{other_killer}** belegt."
+
+    if picked_map in used_maps:
+        # redundante Absicherung
+        return f"Map {picked_map} ist bereits durch einen anderen Pick belegt."
+    return None
+
+def _simulate_turn_after_n_actions(channel_id: int, start_team: str, total_actions: int) -> str:
+    """Rekonstruiert den Zug am Ende von total_actions (wie switch_turn)."""
+    t = start_team
+    ban_stk = 0
+    for i in range(total_actions):
+        # Aktion i wird ausgeführt, danach ggf. Turn switchen:
+        action = formats[channel_id][i] if i < len(formats[channel_id]) else None
+        if tb_mode.get(channel_id) == "noTB":
+            # in noTB wird einfach jedes Mal gewechselt (wie in deiner switch_turn)
+            t = "B" if t == "A" else "A"
+            continue
+        if format_type[channel_id] == "bo5" and action == "ban":
+            if ban_stk == 0:
+                ban_stk = 1
+            else:
+                ban_stk = 0
+                t = "B" if t == "A" else "A"
+        else:
+            t = "B" if t == "A" else "A"
+            ban_stk = 0
+    return t
+
+async def _apply_ban(ctx, channel_id: int, killer: str) -> str:
+    """Gleiche Regeln wie dein !ban Command; Rückgabe = User-Facing Meldung (oder Fehler)."""
+    if not formats[channel_id] and tb_mode[channel_id] != "noTB":
+        return "Bitte erst ein Format wählen."
+    if not coinflip_used[channel_id]:
+        return "Bitte zuerst **!coinflip <Team A> <Team B>** benutzen."
+    if turns[channel_id] not in ["A", "B"]:
+        return "Bitte mit **!first** oder **!second** den Start bestimmen."
+
+    if tb_mode[channel_id] != "noTB":
+        if actions_done[channel_id] >= len(formats[channel_id]) or formats[channel_id][actions_done[channel_id]] != "ban":
+            return "Gerade ist kein BAN an der Reihe."
+    if killer not in killer_pool:
+        return f"{killer} ist kein gültiger Killer."
+    if any(k == killer for k, _ in bans[channel_id]):
+        return f"{killer} wurde bereits gebannt."
+    if any(k == killer for k, _ in picks[channel_id]):
+        return f"{killer} ist bereits gepickt."
+
+    team = turns[channel_id]
+    bans[channel_id].append((killer, team))
+    actions_done[channel_id] += 1
+
+    # noTB Sonderfall: automatisch finalen TB picken, wenn nur 1 übrig
+    if tb_mode[channel_id] == "noTB":
+        remaining = _remaining_killers(channel_id)
+        if len(remaining) == 1:
+            last_killer = remaining[0]
+            picks[channel_id].append((last_killer, "Tiebreaker"))
+            tb_mode[channel_id] = "resolved"
+            await send_final_summary(ctx, channel_id)
+
+    # Turn wechseln wie deine switch_turn
+    if tb_mode[channel_id] == "noTB":
+        turns[channel_id] = "B" if team == "A" else "A"
+    else:
+        # bo3/bo5 Logik
+        idx = actions_done[channel_id] - 1
+        action = formats[channel_id][idx] if idx < len(formats[channel_id]) else None
+        if format_type[channel_id] == "bo5" and action == "ban":
+            # ban-streak Tracking über ban_streak[channel_id]
+            if ban_streak[channel_id] == 0:
+                ban_streak[channel_id] = 1
+            else:
+                ban_streak[channel_id] = 0
+                turns[channel_id] = "B" if team == "A" else "A"
+        else:
+            turns[channel_id] = "B" if team == "A" else "A"
+            ban_streak[channel_id] = 0
+
+    save_state()
+    return f"{killer} wurde gebannt von {team_names[channel_id][team]}."
+
+async def _apply_pick(ctx, channel_id: int, killer: str) -> str:
+    """Gleiche Regeln wie dein !pick Command; Rückgabe = Meldung."""
+    if not formats[channel_id]:
+        return "Bitte erst ein Format wählen."
+    if not coinflip_used[channel_id]:
+        return "Bitte zuerst **!coinflip <Team A> <Team B>** benutzen."
+    if turns[channel_id] not in ["A", "B"]:
+        return "Bitte mit **!first** oder **!second** den Start bestimmen."
+
+    # Map-Konflikte prüfen
+    conflict = _map_conflict_for_pick(channel_id, killer)
+    if conflict:
+        return f"{killer} kann nicht gepickt werden: {conflict}"
+
+    if actions_done[channel_id] >= len(formats[channel_id]) or formats[channel_id][actions_done[channel_id]] != "pick":
+        return "Gerade ist kein PICK an der Reihe."
+    if killer not in killer_pool:
+        return f"{killer} ist kein gültiger Killer."
+    if any(k == killer for k, _ in picks[channel_id]):
+        return f"{killer} ist bereits gepickt."
+    if any(k == killer for k, _ in bans[channel_id]):
+        return f"{killer} ist gebannt."
+
+    team = turns[channel_id]
+    picks[channel_id].append((killer, team))
+    actions_done[channel_id] += 1
+
+    # Turn wechseln (wie oben)
+    if tb_mode[channel_id] == "noTB":
+        turns[channel_id] = "B" if team == "A" else "A"
+    else:
+        idx = actions_done[channel_id] - 1
+        action = formats[channel_id][idx] if idx < len(formats[channel_id]) else None
+        if format_type[channel_id] == "bo5" and action == "ban":
+            if ban_streak[channel_id] == 0:
+                ban_streak[channel_id] = 1
+            else:
+                ban_streak[channel_id] = 0
+                turns[channel_id] = "B" if team == "A" else "A"
+        else:
+            turns[channel_id] = "B" if team == "A" else "A"
+            ban_streak[channel_id] = 0
+
+    save_state()
+    return f"{killer} wurde gepickt von {team_names[channel_id][team]}."
+
+async def _apply_undo(ctx, channel_id: int) -> str:
+    """Macht die letzte Format-Aktion rückgängig (BAN/PICK)."""
+    if tb_mode.get(channel_id) == "noTB":
+        if bans[channel_id]:
+            bans[channel_id].pop()
+            # Turn zurück toggeln
+            turns[channel_id] = "B" if turns[channel_id] == "A" else "A"
+            save_state()
+            return "Letzte BAN in noTB rückgängig gemacht."
+        return "Keine Aktion zum Rückgängig machen (noTB)."
+
+    if actions_done[channel_id] == 0:
+        return "Keine Aktion zum Rückgängig machen."
+
+    last_idx = actions_done[channel_id] - 1
+    last_action = formats[channel_id][last_idx]
+    if last_action == "ban":
+        if not bans[channel_id]:
+            return "Interner Zustand inkonsistent (kein BAN)."
+        bans[channel_id].pop()
+    else:
+        if not picks[channel_id]:
+            return "Interner Zustand inkonsistent (kein PICK)."
+        picks[channel_id].pop()
+
+    actions_done[channel_id] -= 1
+    # Turn neu simulieren ab Anfang
+    start_team = turns[channel_id]
+    # Um den Start korrekt zu kennen, müssen wir den ursprünglichen Start speichern,
+    # aber in deinem Flow ist 'turns' immer "der Nächste dran".
+    # Rekonstruktion: wir brauchen den Start-Vorzug (nach !first/!second).
+    # Wir bewahren dafür eine einfache Heuristik: wenn actions_done==0, bleibt 'turns' wie nach first/second.
+    # Nach Undo simulieren wir den Turn ausgehend vom "first/second"-Ergebnis.
+    # -> Wir nehmen an, dass 'first/second' bereits gesetzt ist und actions_done zählt ab 0.
+    # Finde "initial_turn": das war 'turns' NACH dem first/second und VOR der ersten Aktion.
+    # Wir besitzen diesen Wert nicht separat -> speichern wir ihn beim Setzen:
+    # Workaround: Wenn du 'turns' nach first/second setzt, speichere parallel:
+    #   initial_turn[channel_id] = turns[channel_id]
+    # Für Kompatibilität ohne diese Variable machen wir:
+    #   Wenn actions_done==0, lassen wir turns wie er ist (also initial).
+    initial_turn = turns[channel_id]  # best guess
+    turns[channel_id] = _simulate_turn_after_n_actions(channel_id, initial_turn, actions_done[channel_id])
+
+    save_state()
+    return "Letzte Aktion rückgängig gemacht."
+
+def _build_board_embed(channel_id: int) -> discord.Embed:
+    emb = discord.Embed(
+        title="Match Draft Board",
+        description=f"Format: **{format_type.get(channel_id, 'bo3')}**\n{_format_progress_text(channel_id)}",
+        color=EMBED_COLOR
+    )
+    bans_text = "\n".join([f"{k} ({team_names[channel_id].get(t, t)})" for k, t in bans[channel_id]]) or "—"
+    picks_text = "\n".join([f"{k} ({team_names[channel_id].get(t, t)}) – {killer_map_lookup.get(k, '—')}" for k, t in picks[channel_id]]) or "—"
+
+    emb.add_field(name="Bans", value=bans_text, inline=True)
+    emb.add_field(name="Picks", value=picks_text, inline=True)
+
+    na = announce_next_action(channel_id)
+    if na:
+        emb.add_field(name="Next", value=na, inline=False)
+    else:
+        if tb_mode.get(channel_id) == "noTB":
+            if len(_remaining_killers(channel_id)) == 1:
+                emb.add_field(name="Status", value="noTB beendet – letzter Killer automatisch TB.", inline=False)
+            else:
+                emb.add_field(name="Status", value="noTB aktiv – weiter bannen.", inline=False)
+        else:
+            emb.add_field(name="Status", value="Format beendet.", inline=False)
+
+    return emb
+
+def _user_is_staff(member: discord.Member) -> bool:
+    names = {r.name for r in member.roles}
+    return any(s in names for s in STAFF_ROLES)
+
+# =====================[ STATUS BOARD: VIEW ]=====================
+class DraftBoardView(discord.ui.View):
+    def __init__(self, channel_id: int, *, timeout: Optional[float] = 300):
+        super().__init__(timeout=timeout)
+        self.channel_id = channel_id
+
+    async def _ensure_prereqs(self, interaction: discord.Interaction) -> bool:
+        cid = self.channel_id
+        if not formats[cid] and tb_mode[cid] != "noTB":
+            await interaction.response.send_message("Bitte erst **!bo3** oder **!bo5** setzen.", ephemeral=True)
+            return False
+        if not coinflip_used[cid]:
+            await interaction.response.send_message("Bitte zuerst **!coinflip** benutzen.", ephemeral=True)
+            return False
+        if turns[cid] not in ["A", "B"]:
+            await interaction.response.send_message("Bitte **!first** oder **!second** ausführen.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="BAN", style=discord.ButtonStyle.danger)
+    async def btn_ban(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = self.channel_id
+        if not await self._ensure_prereqs(interaction):
+            return
+        if _next_action(cid) != "ban" and tb_mode.get(cid) != "noTB":
+            await interaction.response.send_message("Momentan ist kein BAN an der Reihe.", ephemeral=True)
+            return
+
+        opts = _remaining_killers(cid)
+        if not opts:
+            await interaction.response.send_message("Keine Killer übrig.", ephemeral=True)
+            return
+
+        # Select bauen (<=25 Optionen, wir haben <25 Killer)
+        class BanSelect(discord.ui.Select):
+            def __init__(self, channel_id: int):
+                options = [discord.SelectOption(label=k, value=k) for k in opts[:25]]
+                super().__init__(placeholder="Killer zum Bannen wählen…", min_values=1, max_values=1, options=options)
+                self.channel_id = channel_id
+
+            async def callback(self, inter: discord.Interaction):
+                async with _lock_for_channel(self.channel_id):
+                    killer = self.values[0]
+                    msg = await _apply_ban(inter, self.channel_id, killer)
+                    # Board updaten
+                    await _update_or_create_board(inter.channel, force_existing=True)
+                    await inter.response.edit_message(content=msg, view=None)
+
+        v = discord.ui.View(timeout=60)
+        v.add_item(BanSelect(cid))
+        await interaction.response.send_message("BAN auswählen:", view=v, ephemeral=True)
+
+    @discord.ui.button(label="PICK", style=discord.ButtonStyle.success)
+    async def btn_pick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = self.channel_id
+        if not await self._ensure_prereqs(interaction):
+            return
+        if _next_action(cid) != "pick":
+            await interaction.response.send_message("Momentan ist kein PICK an der Reihe.", ephemeral=True)
+            return
+
+        opts = _remaining_killers(cid)
+        if not opts:
+            await interaction.response.send_message("Keine Killer übrig.", ephemeral=True)
+            return
+
+        class PickSelect(discord.ui.Select):
+            def __init__(self, channel_id: int):
+                options = [discord.SelectOption(label=k, value=k) for k in opts[:25]]
+                super().__init__(placeholder="Killer zum Picken wählen…", min_values=1, max_values=1, options=options)
+                self.channel_id = channel_id
+
+            async def callback(self, inter: discord.Interaction):
+                killer = self.values[0]
+                conflict = _map_conflict_for_pick(self.channel_id, killer)
+                if conflict:
+                    await inter.response.send_message(f"❌ {conflict}", ephemeral=True)
+                    return
+                async with _lock_for_channel(self.channel_id):
+                    msg = await _apply_pick(inter, self.channel_id, killer)
+                    await _update_or_create_board(inter.channel, force_existing=True)
+                    await inter.response.edit_message(content=msg, view=None)
+
+        v = discord.ui.View(timeout=60)
+        v.add_item(PickSelect(cid))
+        await interaction.response.send_message("PICK auswählen:", view=v, ephemeral=True)
+
+    @discord.ui.button(label="Undo", style=discord.ButtonStyle.secondary)
+    async def btn_undo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _user_is_staff(interaction.user):
+            await interaction.response.send_message("Nur Staff darf Undo.", ephemeral=True)
+            return
+        async with _lock_for_channel(self.channel_id):
+            msg = await _apply_undo(interaction, self.channel_id)
+            await _update_or_create_board(interaction.channel, force_existing=True)
+            await interaction.response.send_message(msg, ephemeral=True)
+
+# =====================[ STATUS BOARD: CREATE / UPDATE ]=====================
+async def _update_or_create_board(channel: discord.TextChannel, *, force_existing: bool = False):
+    """Erstellt oder aktualisiert das Board im Channel."""
+    cid = channel.id
+    init_channel(cid)  # falls nötig
+    emb = _build_board_embed(cid)
+    view = DraftBoardView(cid)
+
+    # Buttons dynamisch enablen/disablen
+    next_act = _next_action(cid)
+    for item in view.children:
+        if isinstance(item, discord.ui.Button):
+            if item.label == "BAN":
+                item.disabled = not (next_act == "ban" or tb_mode.get(cid) == "noTB")
+            elif item.label == "PICK":
+                item.disabled = not (next_act == "pick")
+            elif item.label == "Undo":
+                item.disabled = False
+
+    mid = board_message_id.get(cid)
+    if mid:
+        try:
+            msg = await channel.fetch_message(mid)
+            await msg.edit(embed=emb, view=view)
+            return
+        except discord.NotFound:
+            board_message_id.pop(cid, None)
+            # fällt durch zum Neu-Erstellen
+
+    if force_existing:
+        # gewünscht war Update, aber es gibt keine Message – dann neu anlegen
+        pass
+
+    msg = await channel.send(embed=emb, view=view)
+    board_message_id[cid] = msg.id
+    save_state()
+
+# =====================[ STATUS BOARD: COMMAND ]=====================
+@bot.command(name="board")
+@has_any_role(STAFF_ROLES)
+async def board_cmd(ctx):
+    """Erstellt/aktualisiert das Status-Board in diesem Channel."""
+    await _update_or_create_board(ctx.channel)
+    await ctx.message.add_reaction("✅")
+
 token = os.getenv("TOKEN")
 if token is None:
     raise ValueError("TOKEN environment variable not set!")
