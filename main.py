@@ -581,9 +581,9 @@ async def pick(ctx, *, killer):
 @bot.command()
 @has_any_role(STAFF_ROLES)
 async def reset(ctx):
-    action_log[channel_id] = []
     channel_id = ctx.channel.id
     init_channel(channel_id)
+    action_log[channel_id] = []
     bans[channel_id].clear()
     picks[channel_id].clear()
     turns[channel_id] = None
