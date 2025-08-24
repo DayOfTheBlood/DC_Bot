@@ -1230,11 +1230,15 @@ async def on_message(message):
 from typing import Optional
 import asyncio
 import re
+import discord
 
 # per channel: the board message ID
 board_message_id: dict[int, int] = {}
 # per channel: a lock to avoid race conditions
 _board_locks: dict[int, asyncio.Lock] = {}
+
+# per guild: cache resolved emoji string
+_emoji_cache: dict[tuple[int, str], str] = {}
 
 def _lock_for_channel(cid: int) -> asyncio.Lock:
     if cid not in _board_locks:
@@ -1260,20 +1264,33 @@ def _next_action(channel_id: int) -> Optional[str]:
         return fmt[idx]
     return None  # format finished (TB or end)
 
-def _format_progress_text(channel_id: int) -> str:
+def _emoji_str(guild: discord.Guild, name: str, *, fallback: str = "") -> str:
+    """
+    Resolve a custom emoji by name in this guild and return its mention string (<:name:id>).
+    Falls back to the given fallback string if not found.
+    """
+    key = (guild.id, name)
+    if key in _emoji_cache:
+        return _emoji_cache[key]
+    e = discord.utils.get(guild.emojis, name=name)
+    s = str(e) if e else fallback
+    _emoji_cache[key] = s
+    return s
+
+def _format_progress_text(channel_id: int, guild: discord.Guild) -> str:
     """
     Vertical list, one action per line.
-    Completed actions are suffixed with ':r_check02:'.
-    No emojis.
+    Completed actions are suffixed with the custom emoji r_check02.
     """
     fmt = formats[channel_id]
     done = actions_done[channel_id]
     if not fmt:
         return "(no format set)"
+    check = _emoji_str(guild, "r_check02", fallback=":r_check02:")
     lines = []
     for i, a in enumerate(fmt):
         label = "BAN" if a == "ban" else "PICK"
-        suffix = " :r_check02:" if i < done else ""
+        suffix = f" {check}" if i < done else ""
         lines.append(f"{label}{suffix}")
     return "\n".join(lines)
 
@@ -1441,18 +1458,17 @@ async def _apply_undo(ctx, channel_id: int) -> str:
         picks[channel_id].pop()
 
     actions_done[channel_id] -= 1
-    # Recompute whose turn it is. We don't persist an initial turn snapshot,
-    # so we best-effort simulate from the current 'turns' value.
-    initial_turn = turns[channel_id]  # best guess
+    # best-effort recompute whose turn it is
+    initial_turn = turns[channel_id]
     turns[channel_id] = _simulate_turn_after_n_actions(channel_id, initial_turn, actions_done[channel_id])
 
     save_state()
     return "Last action has been undone."
 
-def _build_board_embed(channel_id: int) -> discord.Embed:
+def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
     emb = discord.Embed(
         title="Match Draft Board",
-        description=f"Format: **{format_type.get(channel_id, 'bo3')}**\n{_format_progress_text(channel_id)}",
+        description=f"Format: **{format_type.get(channel_id, 'bo3')}**\n{_format_progress_text(channel_id, guild)}",
         color=EMBED_COLOR
     )
     bans_text = "\n".join([f"{k} ({team_names[channel_id].get(t, t)})" for k, t in bans[channel_id]]) or "—"
@@ -1583,7 +1599,7 @@ async def _update_or_create_board(channel: discord.TextChannel, *, force_existin
     """Create or update the status board in this channel."""
     cid = channel.id
     init_channel(cid)  # ensure state exists
-    emb = _build_board_embed(cid)
+    emb = _build_board_embed(cid, channel.guild)
     view = DraftBoardView(cid)
 
     # Dynamically enable/disable buttons
@@ -1622,6 +1638,7 @@ async def board_cmd(ctx):
     """Create/update the status board in this channel."""
     await _update_or_create_board(ctx.channel)
     await ctx.message.add_reaction("✅")
+
 
 
 
