@@ -1668,9 +1668,9 @@ class DraftBoardView(discord.ui.View):
                 await _update_or_create_board(inter.channel, force_existing=True)
                 await inter.response.edit_message(content=f"{msg} ✅", view=None)
 
-                v = discord.ui.View(timeout=60)
-                v.add_item(TBSelect(cid))
-                await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
+    v = discord.ui.View(timeout=60)
+    v.add_item(TBSelect(cid))
+    await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
 
     @discord.ui.button(label="No TB", style=discord.ButtonStyle.secondary)
     async def btn_notb(self, interaction: discord.Interaction, button: discord.ui.Button):
