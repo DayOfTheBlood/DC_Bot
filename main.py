@@ -1544,11 +1544,17 @@ def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
         na_clean = re.sub(r'^\s*Next action:\s*', '', na, flags=re.IGNORECASE)
         emb.add_field(name="Next", value=na_clean, inline=False)
     else:
-        if tb_mode.get(channel_id) == "noTB":
+        mode = tb_mode.get(channel_id)
+        if mode == "noTB":
             if len(_remaining_killers(channel_id)) == 1:
                 emb.add_field(name="Status", value="noTB finished – last killer auto-selected as TB.", inline=False)
             else:
-                emb.add_field(name="Status", value="noTB active – continue banning.", inline=False)
+                # explizit zeigen, wer als Nächstes dran ist
+                emb.add_field(name="Status", value=f"noTB active — Next: BAN by {team_names[channel_id][turns[channel_id]]}.", inline=False)
+        elif mode == "TB":
+            emb.add_field(name="Status", value="TB chosen — draft complete.", inline=False)
+        elif mode == "resolved":
+            emb.add_field(name="Status", value="TB auto-selected — draft complete.", inline=False)
         else:
             emb.add_field(name="Status", value="Format finished.", inline=False)
 
