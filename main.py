@@ -1672,9 +1672,9 @@ class DraftBoardView(discord.ui.View):
                 # Menü wegräumen + kurze Bestätigung nur für den Nutzer
                 await inter.response.edit_message(content="TB applied ✅", view=None)
 
-    v = discord.ui.View(timeout=60)
-    v.add_item(TBSelect(cid))
-    await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
+                v = discord.ui.View(timeout=60)
+                v.add_item(TBSelect(cid))
+                await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
 
     @discord.ui.button(label="No TB", style=discord.ButtonStyle.secondary)
     async def btn_notb(self, interaction: discord.Interaction, button: discord.ui.Button):
