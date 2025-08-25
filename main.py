@@ -2095,7 +2095,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
 
     # 0) bereits im Zielteam?
     if any(r.id == team_role.id for r in current):
-        await ctx.send(f"No change: {member.mention} already has {team_role.mention}.")
+        await ctx.send(f"No change: {member.mention} is already in {team_role.mention}.")
         return
     
     # 1) hat mehrere Teamrollen -> Admin-Fall, erst bereinigen
@@ -2113,7 +2113,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         )
         msg = await ctx.send(
             content=(f"{member.mention} please confirm the team change:\n"
-                     f"From {from_role.mention} ➜ To {team_role.mention}\n"
+                     f"From {from_role.mention} To {team_role.mention}\n"
                      f"(Requested by {ctx.author.mention})"),
             view=view
         )
@@ -2127,7 +2127,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
     except discord.Forbidden:
         await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
         return
-    info = await ctx.send(f"Added {team_role.mention} to {member.mention}.")
+    info = await ctx.send(f"Added {member.mention} to {team_role.mention}.")
     asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
 @bot.command(name="remove")
@@ -2165,7 +2165,7 @@ async def remove_member_from_team(ctx: commands.Context, member: discord.Member 
 
     # Ziel-User hat die Teamrolle nicht -> nichts zu tun
     if not any(r.id == team_role.id for r in member.roles):
-        info = await ctx.send(f"{member.mention} doesn't have {team_role.mention}. Nothing to do.")
+        info = await ctx.send(f"{member.mention} is not a member of {team_role.mention}. Nothing to do.")
         asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
         return
 
@@ -2179,7 +2179,7 @@ async def remove_member_from_team(ctx: commands.Context, member: discord.Member 
         await ctx.send("Role update failed due to an API error. Try again.")
         return
 
-    info = await ctx.send(f"Removed {team_role.mention} from {member.mention}.")
+    info = await ctx.send(f"Removed {member.mention} from {team_role.mention}.")
     asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
 
