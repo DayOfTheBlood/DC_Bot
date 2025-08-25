@@ -279,6 +279,7 @@ def get_full_state():
             "coinflip_used": coinflip_used[cid],       
             "tiebreaker_picked": tiebreaker_picked[cid]
         }
+        state["boards"] = {str(cid): mid for cid, mid in board_message_id.items()}
     return state
 
 def apply_full_state(data: dict):
@@ -287,6 +288,14 @@ def apply_full_state(data: dict):
     bans.clear(); picks.clear(); turns.clear(); formats.clear(); tb_mode.clear()
     actions_done.clear(); format_type.clear(); last_action_team.clear(); ban_streak.clear()
     team_names.clear(); coinflip_winner.clear(); coinflip_used.clear(); tiebreaker_picked.clear()
+    action_log.clear()
+    board_message_id.clear()
+    for cid_str, mid in data.get("boards", {}).items():
+        try:
+            cid = int(cid_str)
+            board_message_id[cid] = int(mid)
+        except (ValueError, TypeError):
+            continue
 
     for cid_str, s in data.items():
         try:
@@ -308,6 +317,7 @@ def apply_full_state(data: dict):
         coinflip_winner[cid] = s.get("coinflip_winner", None)
         coinflip_used[cid] = bool(s.get("coinflip_used", False))
         tiebreaker_picked[cid] = bool(s.get("tiebreaker_picked", False))
+        
 
 def save_state():
     """Atomisches Speichern auf Disk."""
@@ -410,6 +420,19 @@ async def _get_second_message(thread: discord.Thread) -> discord.Message | None:
 @bot.event
 async def on_ready():
     load_state_if_exists()
+
+    for cid, _ in list(board_message_id.items()):
+    ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
+    if not isinstance(ch, discord.TextChannel):
+        board_message_id.pop(cid, None)
+        continue
+    try:
+        await _update_or_create_board(ch, force_existing=True)
+    except discord.Forbidden:
+        pass
+    except discord.NotFound:
+        await _update_or_create_board(ch, force_existing=True)    
+
     print(f"Bot is online: {bot.user}")
     await bot.change_presence(activity=discord.Game(name="made by Fluffy"))
 
