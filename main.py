@@ -2072,27 +2072,12 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
     except discord.Forbidden:
         await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
         return
-    await ctx.send(f"Added {team_role.mention} to {member.mention}.")
+    info = await ctx.send(f"Added {team_role.mention} to {member.mention}.")
+    asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
 
-    try:
-        if to_remove:
-            await member.remove_roles(*to_remove, reason=f"Team reassignment by {ctx.author} ({ctx.author.id})")
-        if to_add:
-            await member.add_roles(*to_add, reason=f"Team assignment by {ctx.author} ({ctx.author.id})")
-    except discord.Forbidden:
-        await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
-        return
-    except discord.HTTPException:
-        await ctx.send("Role update failed due to an API error. Try again.")
-        return
 
-    removed_txt = f" removed: {', '.join(r.mention for r in to_remove)}" if to_remove else ""
-    added_txt = f" added: {', '.join(r.mention for r in to_add)}" if to_add else ""
-    if not removed_txt and not added_txt:
-        await ctx.send(f"No change: {member.mention} already has {team_role.mention}.")
-    else:
-        await ctx.send(f"Updated {member.mention}:{added_txt}{removed_txt}")
+
 
 
 
