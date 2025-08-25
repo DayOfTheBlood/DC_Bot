@@ -1655,22 +1655,22 @@ class DraftBoardView(discord.ui.View):
             await interaction.response.send_message("No killers remaining.", ephemeral=True)
             return
 
-    class TBSelect(discord.ui.Select):
-        def __init__(self, channel_id: int):
-            options = [discord.SelectOption(label=k, value=k) for k in opts[:25]]
-            super().__init__(placeholder="Choose a Tiebreaker…", min_values=1, max_values=1, options=options)
-            self.channel_id = channel_id
-
-        async def callback(self, inter: discord.Interaction):
-            killer = self.values[0]
-            async with _lock_for_channel(self.channel_id):
-                msg = await _apply_tb(inter, self.channel_id, killer)
-                await _update_or_create_board(inter.channel, force_existing=True)
-                await inter.response.edit_message(content=f"{msg} ✅", view=None)
-
-    v = discord.ui.View(timeout=60)
-    v.add_item(TBSelect(cid))
-    await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
+        class TBSelect(discord.ui.Select):
+            def __init__(self, channel_id: int):
+                options = [discord.SelectOption(label=k, value=k) for k in opts[:25]]
+                super().__init__(placeholder="Choose a Tiebreaker…", min_values=1, max_values=1, options=options)
+                self.channel_id = channel_id
+    
+            async def callback(self, inter: discord.Interaction):
+                killer = self.values[0]
+                async with _lock_for_channel(self.channel_id):
+                    msg = await _apply_tb(inter, self.channel_id, killer)
+                    await _update_or_create_board(inter.channel, force_existing=True)
+                    await inter.response.edit_message(content=f"{msg} ✅", view=None)
+    
+        v = discord.ui.View(timeout=60)
+        v.add_item(TBSelect(cid))
+        await interaction.response.send_message("Select Tiebreaker:", view=v, ephemeral=True)
 
     @discord.ui.button(label="No TB", style=discord.ButtonStyle.secondary)
     async def btn_notb(self, interaction: discord.Interaction, button: discord.ui.Button):
