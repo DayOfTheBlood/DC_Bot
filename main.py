@@ -1930,9 +1930,15 @@ async def teams_cmd(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 class TeamSwapConfirmView(discord.ui.View):
-    def __init__(self, target: discord.Member, from_role: discord.Role, to_role: discord.Role, requester: discord.Member, *, timeout: float = SWAP_CONFIRM_TTL):
-                 requester: discord.Member, origin_msg: discord.Message, *,
-                 timeout: float = SWAP_CONFIRM_TTL):
+    def __init__(
+        self,
+        target: discord.Member,
+        from_role: discord.Role,
+        to_role: discord.Role,
+        requester: discord.Member,
+        origin_msg: discord.Message,
+        timeout: float = SWAP_CONFIRM_TTL,
+    ):
         super().__init__(timeout=timeout)
         self.target = target
         self.from_role = from_role
