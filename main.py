@@ -113,7 +113,7 @@ running_timers = {}
 STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
 TEAM_SCAN_INTERVAL_SEC = 300
-TEAM_MGMT_CHANNEL_ID = 123456789012345678
+TEAM_MGMT_CHANNEL_ID = 1409588957200515180
 
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
