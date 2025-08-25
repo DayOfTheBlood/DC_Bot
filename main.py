@@ -1944,6 +1944,7 @@ class TeamSwapConfirmView(discord.ui.View):
         self.from_role = from_role
         self.to_role = to_role
         self.requester = requester
+        self.origin_msg = origin_msg
         self.message: discord.Message | None = None
 
     async def on_timeout(self):
