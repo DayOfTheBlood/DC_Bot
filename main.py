@@ -1526,10 +1526,10 @@ def _build_board_embed(channel_id: int, guild: discord.Guild) -> discord.Embed:
     emb.add_field(name="Picks", value=picks_text, inline=True)
 
     tb_killer = next((k for k, t in picks[channel_id] if t == "Tiebreaker"), None)
-        if tb_mode.get(channel_id) == "TB":
-            emb.add_field(name="Tiebreaker", value=tb_killer or "—", inline=False)
-        elif actions_done[channel_id] >= len(formats[channel_id]) and tb_mode.get(channel_id) == "none":
-            emb.add_field(name="Tiebreaker", value="Not decided — use the buttons below.", inline=False)
+    if tb_mode.get(channel_id) == "TB":
+        emb.add_field(name="Tiebreaker", value=tb_killer or "—", inline=False)
+    elif actions_done[channel_id] >= len(formats[channel_id]) and tb_mode.get(channel_id) == "none":
+        emb.add_field(name="Tiebreaker", value="Not decided — use the buttons below.", inline=False)
 
     recent = "\n".join(action_log[channel_id][-3:]) or "—"
     emb.add_field(name="Recent", value=recent, inline=False)
