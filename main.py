@@ -1487,13 +1487,10 @@ async def _apply_tb(ctx, channel_id: int, killer: str) -> str:
 
     picks[channel_id].append((killer, "Tiebreaker"))
     tb_mode[channel_id] = "TB"
-    # falls du action_log nutzt:
     if 'action_log' in globals():
         action_log[channel_id].append(f"TB — {killer}")
-
+    
     save_state()
-    # Wenn du den Channel clean halten willst, kannst du die nächste Zeile auskommentieren:
-    await send_final_summary(ctx, channel_id)
     return f"Tiebreaker picked: **{killer}**"
 
 async def _apply_notb(ctx, channel_id: int) -> str:
@@ -1669,8 +1666,7 @@ class DraftBoardView(discord.ui.View):
             async with _lock_for_channel(self.channel_id):
                 msg = await _apply_tb(inter, self.channel_id, killer)
                 await _update_or_create_board(inter.channel, force_existing=True)
-                # Menü wegräumen + kurze Bestätigung nur für den Nutzer
-                await inter.response.edit_message(content="TB applied ✅", view=None)
+                await inter.response.edit_message(content=f"{msg} ✅", view=None)
 
                 v = discord.ui.View(timeout=60)
                 v.add_item(TBSelect(cid))
