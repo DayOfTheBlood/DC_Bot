@@ -1713,6 +1713,10 @@ async def _update_or_create_board(channel: discord.TextChannel, *, force_existin
 
     # Dynamically enable/disable buttons
     next_act = _next_action(cid)
+    fmt_done = bool(formats[cid]) and actions_done[cid] >= len(formats[cid])
+    tb_open = tb_mode.get(cid) == "none"
+    has_turn = turns[cid] in ("A", "B")
+
     for item in view.children:
         if isinstance(item, discord.ui.Button):
             if item.label == "BAN":
