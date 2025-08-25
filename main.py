@@ -112,6 +112,7 @@ running_timers = {}
 
 STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
+TEAM_SCAN_INTERVAL_SEC = 300
 
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
@@ -136,6 +137,36 @@ def _find_team_anchors(guild: discord.Guild) -> tuple[discord.Role | None, disco
 def _scan_team_roles_between(guild: discord.Guild, start: discord.Role, end: discord.Role) -> list[discord.Role]:
     lo, hi = sorted((start.position, end.position))
     return [r for r in guild.roles if lo < r.position < hi]
+
+async def _team_roles_autoscan_loop():
+    placeholder = re.compile(r"team\s*\d+$", re.IGNORECASE)
+    while True:
+        try:
+            store = _load_team_roles_store()
+            store.setdefault("guilds", {})
+            now_iso = datetime.utcnow().isoformat() + "Z"
+
+            for guild in bot.guilds:
+                start, end = _find_team_anchors(guild)
+                if not start or not end:
+                    continue
+
+                roles_between = _scan_team_roles_between(guild, start, end)
+                visible = [r for r in roles_between if not placeholder.fullmatch(r.name)]
+                visible_sorted = sorted(visible, key=lambda r: r.name.casefold())
+
+                gid = str(guild.id)
+                store["guilds"][gid] = {
+                    "updated_at": now_iso,
+                    "anchors": {"start": start.id, "end": end.id},
+                    "teams": [{"id": r.id, "name": r.name, "position": r.position} for r in visible_sorted],
+                }
+
+            _save_team_roles_store(store)
+        except Exception as e:
+            print(f"[teams autoscan] error: {e}")
+        await asyncio.sleep(TEAM_SCAN_INTERVAL_SEC)
+
 
 def has_any_role(allowed_roles):
 
@@ -441,6 +472,9 @@ async def _get_second_message(thread: discord.Thread) -> discord.Message | None:
 @bot.event
 async def on_ready():
     load_state_if_exists()
+    if not getattr(bot, "_team_autoscan_started", False):
+        asyncio.create_task(_team_roles_autoscan_loop())
+        bot._team_autoscan_started = True
 
     for cid, _ in list(board_message_id.items()):
         ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
@@ -1822,65 +1856,56 @@ async def board_cmd(ctx):
 
 # =====================[ TEST ZONE ]=====================
 
-@bot.command(name="teamscan")
+@bot.command(name="teams", aliases=["teamscan"])
 @has_any_role(STAFF_ROLES)
-async def teamscan_cmd(ctx: commands.Context):
-    """Scan roles between the two anchors and persist them to team_roles.json, then display."""
+async def teams_cmd(ctx: commands.Context):
     if ctx.guild is None:
         await ctx.send("This command must be used in a server.")
         return
 
-    start, end = _find_team_anchors(ctx.guild)
-    if not start or not end:
-        missing = []
-        if not start: missing.append("`---Team Names Start---`")
-        if not end:   missing.append("`---Team Names End---`")
-        await ctx.send(f"Anchor role(s) missing: {', '.join(missing)}")
-        return
-
-    teams = _scan_team_roles_between(ctx.guild, start, end)
-
-    placeholder = re.compile(r"team\s*\d+$", re.IGNORECASE)
-    visible = [r for r in teams if not placeholder.fullmatch(r.name)]
-    visible_sorted = sorted(visible, key=lambda r: r.name.casefold())
-
-    # persist per-guild
     store = _load_team_roles_store()
-    gid = str(ctx.guild.id)
-    store.setdefault("guilds", {})
-    store["guilds"][gid] = {
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-        "anchors": {"start": start.id, "end": end.id},
-        "teams": [{"id": r.id, "name": r.name, "position": r.position} for r in visible],
-    }
-    _save_team_roles_store(store)
-
-    # show result
-    if not teams:
-        await ctx.send(f"Found **0** team roles between anchors.\nStart: <@&{start.id}>  End: <@&{end.id}>")
+    data = store.get("guilds", {}).get(str(ctx.guild.id))
+    if not data:
+        await ctx.send("No team role snapshot found yet. The autoscan runs every 5 minutes.")
         return
 
-    # hübsche Ausgabe (chunken, falls viele)
-    lines = [f"- <@&{r.id}> (`{r.name}`)" for r in visible_sorted]
-    chunks: list[list[str]] = []
-    cur: list[str] = []
-    cur_len = 0
-    for ln in lines:
-        if cur_len + len(ln) + 1 > 900:  # etwas Puffer unter 1024 Limit
-            chunks.append(cur); cur = [ln]; cur_len = len(ln)
-        else:
-            cur.append(ln); cur_len += len(ln) + 1
-    if cur: chunks.append(cur)
+    start_id = data.get("anchors", {}).get("start")
+    end_id = data.get("anchors", {}).get("end")
+    teams = data.get("teams", [])
+    updated = data.get("updated_at", "—")
 
     embed = discord.Embed(
-        title="Team Roles Scan",
-        description=f"Anchors: Start <@&{start.id}> • End <@&{end.id}>\nFound **{len(visible)}** team role(s).",
+        title="Team Roles (from JSON)",
+        description=(
+            f"Anchors: Start {('<@&'+str(start_id)+'>' if start_id else '—')} • "
+            f"End {('<@&'+str(end_id)+'>' if end_id else '—')}\n"
+            f"Last update: `{updated}`\n"
+            f"Found **{len(teams)}** team role(s)."
+        ),
         color=EMBED_COLOR,
     )
-    for i, chunk in enumerate(chunks, 1):
-        embed.add_field(name=f"Teams ({i}/{len(chunks)})", value="\n".join(chunk), inline=False)
+
+    # Bereits alphabetisch gespeichert; zur Sicherheit nochmal nach name sortieren
+    teams_sorted = sorted(teams, key=lambda t: t.get("name","").casefold())
+    lines = [f"- <@&{t['id']}> (`{t['name']}`)" for t in teams_sorted]
+
+    # in 1024er Felder chunking
+    chunk, chunk_len, parts = [], 0, []
+    for ln in lines:
+        if chunk_len + len(ln) + 1 > 900:
+            parts.append("\n".join(chunk)); chunk, chunk_len = [ln], len(ln)
+        else:
+            chunk.append(ln); chunk_len += len(ln) + 1
+    if chunk: parts.append("\n".join(chunk))
+
+    if parts:
+        for i, block in enumerate(parts, 1):
+            embed.add_field(name=f"Teams ({i}/{len(parts)})", value=block, inline=False)
+    else:
+        embed.add_field(name="Teams", value="—", inline=False)
 
     await ctx.send(embed=embed)
+
 
 
 
