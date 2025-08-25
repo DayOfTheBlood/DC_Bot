@@ -114,7 +114,7 @@ STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
 TEAM_SCAN_INTERVAL_SEC = 300
 TEAM_MGMT_CHANNEL_ID = 1409588957200515180
-SWAP_CONFIRM_TTL = 15 * 60
+SWAP_CONFIRM_TTL = 24 * 60 * 60
 
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
@@ -123,6 +123,14 @@ ALLOWED_KILLER_KEYS = {
 def _member_team_roles(member: discord.Member) -> list[discord.Role]:
     team_ids = _team_role_ids_from_store(member.guild.id)
     return [r for r in member.roles if r.id in team_ids]
+
+async def _delete_messages_later(*msgs: discord.Message, delay: int = 10):
+    await asyncio.sleep(delay)
+    for m in msgs:
+        try:
+            await m.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
 
 def _load_team_roles_store() -> dict:
     if TEAM_ROLES_FILE.exists():
@@ -1923,6 +1931,8 @@ async def teams_cmd(ctx: commands.Context):
 
 class TeamSwapConfirmView(discord.ui.View):
     def __init__(self, target: discord.Member, from_role: discord.Role, to_role: discord.Role, requester: discord.Member, *, timeout: float = SWAP_CONFIRM_TTL):
+                 requester: discord.Member, origin_msg: discord.Message, *,
+                 timeout: float = SWAP_CONFIRM_TTL):
         super().__init__(timeout=timeout)
         self.target = target
         self.from_role = from_role
@@ -1931,13 +1941,15 @@ class TeamSwapConfirmView(discord.ui.View):
         self.message: discord.Message | None = None
 
     async def on_timeout(self):
-        # UI einfrieren, Label anpassen
+        # nach 24h: Request & Ursprungsbefehl entfernen
         try:
             if self.message:
-                for c in self.children:
-                    if isinstance(c, discord.ui.Button):
-                        c.disabled = True
-                await self.message.edit(content="(Team change request expired)", view=self)
+                await self.message.delete()
+        except Exception:
+            pass
+        try:
+            if self.origin_msg:
+                await self.origin_msg.delete()
         except Exception:
             pass
 
@@ -1955,6 +1967,9 @@ class TeamSwapConfirmView(discord.ui.View):
         except Exception:
             pass
         await interaction.response.send_message("Received. ✅", ephemeral=True)
+        if self.message or self.origin_msg:
+            asyncio.create_task(_delete_messages_later(*(x for x in (self.message, self.origin_msg) if x), delay=10))
+
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2030,7 +2045,10 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
     # 2) hat genau eine andere Teamrolle -> Swap mit Bestätigung
     if len(current) == 1:
         from_role = current[0]
-        view = TeamSwapConfirmView(target=member, from_role=from_role, to_role=team_role, requester=ctx.author, timeout=SWAP_CONFIRM_TTL)
+        view = TeamSwapConfirmView(
+            target=member, from_role=from_role, to_role=team_role,
+            requester=ctx.author, origin_msg=ctx.message, timeout=SWAP_CONFIRM_TTL
+        )
         msg = await ctx.send(
             content=(f"{member.mention} please confirm the team change:\n"
                      f"From {from_role.mention} ➜ To {team_role.mention}\n"
@@ -2039,6 +2057,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         )
         view.message = msg
         return
+
     
     # 3) hat gar keine Teamrolle -> direkt zuweisen
     try:
