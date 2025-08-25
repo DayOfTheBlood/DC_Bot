@@ -2130,6 +2130,59 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
     info = await ctx.send(f"Added {team_role.mention} to {member.mention}.")
     asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
+@bot.command(name="remove")
+async def remove_member_from_team(ctx: commands.Context, member: discord.Member | None = None):
+    """Entfernt dem genannten User die Teamrolle des Aufrufers (auf Basis der Anker-Teams)."""
+    if ctx.guild is None:
+        await ctx.send("This command must be used in a server.")
+        return
+
+    # nur im Management-Channel
+    if TEAM_MGMT_CHANNEL_ID and ctx.channel.id != TEAM_MGMT_CHANNEL_ID:
+        await ctx.send("Please use this command in the designated team management channel.")
+        return
+
+    if member is None:
+        await ctx.send("Usage: `!remove @User`")
+        return
+
+    team_role_ids = _team_role_ids_from_store(ctx.guild.id)
+    if not team_role_ids:
+        await ctx.send("No team roles snapshot found yet. Wait for the autoscan (every 5 min) or set up anchors.")
+        return
+
+    # Aufrufer muss genau eine Teamrolle haben
+    author_team_roles = [r for r in ctx.author.roles if r.id in team_role_ids]
+    if len(author_team_roles) == 0:
+        await ctx.send("You don't have a team role, so I can't infer which team to remove from.")
+        return
+    if len(author_team_roles) > 1:
+        names = ", ".join(f"`{r.name}`" for r in author_team_roles)
+        await ctx.send(f"You have multiple team roles ({names}). Remove the extra one(s) first.")
+        return
+
+    team_role = author_team_roles[0]
+
+    # Ziel-User hat die Teamrolle nicht -> nichts zu tun
+    if not any(r.id == team_role.id for r in member.roles):
+        info = await ctx.send(f"{member.mention} doesn't have {team_role.mention}. Nothing to do.")
+        asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
+        return
+
+    # Rolle entfernen
+    try:
+        await member.remove_roles(team_role, reason=f"Team removal by {ctx.author} ({ctx.author.id})")
+    except discord.Forbidden:
+        await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
+        return
+    except discord.HTTPException:
+        await ctx.send("Role update failed due to an API error. Try again.")
+        return
+
+    info = await ctx.send(f"Removed {team_role.mention} from {member.mention}.")
+    asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
+
+
 
 
 
