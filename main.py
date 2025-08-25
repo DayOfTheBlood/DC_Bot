@@ -2281,9 +2281,10 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
     def _fmt(list_tuples):
         return "\n".join(x[1] for x in list_tuples) if list_tuples else "—"
 
+    role_display = role.mention if role else f"`{team.get('name', '')}`"
     emb = discord.Embed(
         title=f"Team Status — {team.get('name', 'Unknown')}",
-        description=(f"Role: {role.mention if role else f'`{team.get('name','')}`'}"),
+        description=f"Role: {role_display}",
         color=EMBED_COLOR,
     )
     emb.add_field(name="Roster size (players)", value=str(roster_size), inline=True)
