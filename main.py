@@ -114,10 +114,15 @@ STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
 TEAM_SCAN_INTERVAL_SEC = 300
 TEAM_MGMT_CHANNEL_ID = 1409588957200515180
+SWAP_CONFIRM_TTL = 15 * 60
 
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
+
+def _member_team_roles(member: discord.Member) -> list[discord.Role]:
+    team_ids = _team_role_ids_from_store(member.guild.id)
+    return [r for r in member.roles if r.id in team_ids]
 
 def _load_team_roles_store() -> dict:
     if TEAM_ROLES_FILE.exists():
@@ -1916,6 +1921,68 @@ async def teams_cmd(ctx: commands.Context):
 
     await ctx.send(embed=embed)
 
+class TeamSwapConfirmView(discord.ui.View):
+    def __init__(self, target: discord.Member, from_role: discord.Role, to_role: discord.Role, requester: discord.Member, *, timeout: float = SWAP_CONFIRM_TTL):
+        super().__init__(timeout=timeout)
+        self.target = target
+        self.from_role = from_role
+        self.to_role = to_role
+        self.requester = requester
+        self.message: discord.Message | None = None
+
+    async def on_timeout(self):
+        # UI einfrieren, Label anpassen
+        try:
+            if self.message:
+                for c in self.children:
+                    if isinstance(c, discord.ui.Button):
+                        c.disabled = True
+                await self.message.edit(content="(Team change request expired)", view=self)
+        except Exception:
+            pass
+
+    def _is_target(self, user: discord.abc.User) -> bool:
+        return user.id == self.target.id
+
+    async def _finalize(self, interaction: discord.Interaction, text: str):
+        # Disable buttons + Info
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                c.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(content=text, view=self)
+        except Exception:
+            pass
+        await interaction.response.send_message("Received. ✅", ephemeral=True)
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_target(interaction.user):
+            await interaction.response.send_message("This request is not for you.", ephemeral=True)
+            return
+        # Zustand gegenprüfen (hat der User noch die 'from_role'?)
+        current_team_roles = _member_team_roles(self.target)
+        if not any(r.id == self.from_role.id for r in current_team_roles):
+            await interaction.response.send_message("Your team role changed meanwhile. Please ask your captain to resend.", ephemeral=True)
+            return
+        # Wechsel durchführen
+        try:
+            await self.target.remove_roles(self.from_role, reason=f"Team swap (by {self.requester})")
+            if not any(r.id == self.to_role.id for r in self.target.roles):
+                await self.target.add_roles(self.to_role, reason=f"Team swap (by {self.requester})")
+        except discord.Forbidden:
+            await interaction.response.send_message("I can't change roles (missing permissions / role hierarchy).", ephemeral=True)
+            return
+        await self._finalize(interaction, f"✅ {self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).")
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    async def btn_decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_target(interaction.user):
+            await interaction.response.send_message("This request is not for you.", ephemeral=True)
+            return
+        await self._finalize(interaction, f"❌ {self.target.mention} declined the team change to {self.to_role.mention}.")
+
 @bot.command(name="add")
 async def add_member_to_team(ctx: commands.Context, member: discord.Member | None = None):
     """Weist dem genannten User die Teamrolle des Aufrufers zu (basierend auf den Anker-Teams)."""
@@ -1947,9 +2014,40 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
 
     team_role = author_team_roles[0]
 
-    target_team_roles = [r for r in member.roles if r.id in team_role_ids]
-    to_remove = [r for r in target_team_roles if r.id != team_role.id]
-    to_add = [] if any(r.id == team_role.id for r in target_team_roles) else [team_role]
+    current = _member_team_roles(member)
+
+    # 0) bereits im Zielteam?
+    if any(r.id == team_role.id for r in current):
+        await ctx.send(f"No change: {member.mention} already has {team_role.mention}.")
+        return
+    
+    # 1) hat mehrere Teamrollen -> Admin-Fall, erst bereinigen
+    if len(current) > 1:
+        names = ", ".join(r.mention for r in current)
+        await ctx.send(f"{member.mention} has multiple team roles ({names}). Please clean this up first.")
+        return
+    
+    # 2) hat genau eine andere Teamrolle -> Swap mit Bestätigung
+    if len(current) == 1:
+        from_role = current[0]
+        view = TeamSwapConfirmView(target=member, from_role=from_role, to_role=team_role, requester=ctx.author, timeout=SWAP_CONFIRM_TTL)
+        msg = await ctx.send(
+            content=(f"{member.mention} please confirm the team change:\n"
+                     f"From {from_role.mention} ➜ To {team_role.mention}\n"
+                     f"(Requested by {ctx.author.mention})"),
+            view=view
+        )
+        view.message = msg
+        return
+    
+    # 3) hat gar keine Teamrolle -> direkt zuweisen
+    try:
+        await member.add_roles(team_role, reason=f"Team assignment by {ctx.author} ({ctx.author.id})")
+    except discord.Forbidden:
+        await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
+        return
+    await ctx.send(f"Added {team_role.mention} to {member.mention}.")
+
 
     try:
         if to_remove:
