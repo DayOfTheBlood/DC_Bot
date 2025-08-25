@@ -422,16 +422,16 @@ async def on_ready():
     load_state_if_exists()
 
     for cid, _ in list(board_message_id.items()):
-    ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
-    if not isinstance(ch, discord.TextChannel):
-        board_message_id.pop(cid, None)
-        continue
-    try:
-        await _update_or_create_board(ch, force_existing=True)
-    except discord.Forbidden:
-        pass
-    except discord.NotFound:
-        await _update_or_create_board(ch, force_existing=True)    
+        ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
+        if not isinstance(ch, discord.TextChannel):
+            board_message_id.pop(cid, None)
+            continue
+        try:
+            await _update_or_create_board(ch, force_existing=True)
+        except discord.Forbidden:
+            pass
+        except discord.NotFound:
+            await _update_or_create_board(ch, force_existing=True)    
 
     print(f"Bot is online: {bot.user}")
     await bot.change_presence(activity=discord.Game(name="made by Fluffy"))
