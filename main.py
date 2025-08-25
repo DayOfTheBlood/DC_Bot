@@ -111,10 +111,31 @@ EMBED_COLOR = 0x790000
 running_timers = {}
 
 STATE_FILE = Path(__file__).with_name("state.json")
+TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
 
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
+
+def _load_team_roles_store() -> dict:
+    if TEAM_ROLES_FILE.exists():
+        try:
+            return json.loads(TEAM_ROLES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _save_team_roles_store(store: dict):
+    TEAM_ROLES_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _find_team_anchors(guild: discord.Guild) -> tuple[discord.Role | None, discord.Role | None]:
+    start = discord.utils.get(guild.roles, name="---Team Names Start---")
+    end   = discord.utils.get(guild.roles, name="---Team Names End---")
+    return start, end
+
+def _scan_team_roles_between(guild: discord.Guild, start: discord.Role, end: discord.Role) -> list[discord.Role]:
+    lo, hi = sorted((start.position, end.position))
+    return [r for r in guild.roles if lo < r.position < hi]
 
 def has_any_role(allowed_roles):
 
@@ -1270,11 +1291,6 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-
-
-
-
-
 # =====================[ STATUS BOARD: GLOBALS ]=====================
 from typing import Optional
 import asyncio
@@ -1804,8 +1820,63 @@ async def board_cmd(ctx):
 
 
 
+# =====================[ TEST ZONE ]=====================
 
+@bot.command(name="teamscan")
+@has_any_role(STAFF_ROLES)
+async def teamscan_cmd(ctx: commands.Context):
+    """Scan roles between the two anchors and persist them to team_roles.json, then display."""
+    if ctx.guild is None:
+        await ctx.send("This command must be used in a server.")
+        return
 
+    start, end = _find_team_anchors(ctx.guild)
+    if not start or not end:
+        missing = []
+        if not start: missing.append("`---Team Names Start---`")
+        if not end:   missing.append("`---Team Names End---`")
+        await ctx.send(f"Anchor role(s) missing: {', '.join(missing)}")
+        return
+
+    teams = _scan_team_roles_between(ctx.guild, start, end)
+
+    # persist per-guild
+    store = _load_team_roles_store()
+    gid = str(ctx.guild.id)
+    store.setdefault("guilds", {})
+    store["guilds"][gid] = {
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "anchors": {"start": start.id, "end": end.id},
+        "teams": [{"id": r.id, "name": r.name, "position": r.position} for r in teams],
+    }
+    _save_team_roles_store(store)
+
+    # show result
+    if not teams:
+        await ctx.send(f"Found **0** team roles between anchors.\nStart: <@&{start.id}>  End: <@&{end.id}>")
+        return
+
+    # hübsche Ausgabe (chunken, falls viele)
+    lines = [f"- <@&{r.id}> (`{r.name}`)" for r in sorted(teams, key=lambda x: x.position, reverse=False)]
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    cur_len = 0
+    for ln in lines:
+        if cur_len + len(ln) + 1 > 900:  # etwas Puffer unter 1024 Limit
+            chunks.append(cur); cur = [ln]; cur_len = len(ln)
+        else:
+            cur.append(ln); cur_len += len(ln) + 1
+    if cur: chunks.append(cur)
+
+    embed = discord.Embed(
+        title="Team Roles Scan",
+        description=f"Anchors: Start <@&{start.id}> • End <@&{end.id}>\nFound **{len(teams)}** team role(s).",
+        color=EMBED_COLOR,
+    )
+    for i, chunk in enumerate(chunks, 1):
+        embed.add_field(name=f"Teams ({i}/{len(chunks)})", value="\n".join(chunk), inline=False)
+
+    await ctx.send(embed=embed)
 
 
 
