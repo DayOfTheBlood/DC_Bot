@@ -1842,6 +1842,7 @@ async def teamscan_cmd(ctx: commands.Context):
 
     placeholder = re.compile(r"team\s*\d+$", re.IGNORECASE)
     visible = [r for r in teams if not placeholder.fullmatch(r.name)]
+    visible_sorted = sorted(visible, key=lambda r: r.name.casefold())
 
     # persist per-guild
     store = _load_team_roles_store()
@@ -1860,7 +1861,7 @@ async def teamscan_cmd(ctx: commands.Context):
         return
 
     # hübsche Ausgabe (chunken, falls viele)
-    lines = [f"- <@&{r.id}> (`{r.name}`)" for r in sorted(visible, key=lambda x: x.position, reverse=False)]
+    lines = [f"- <@&{r.id}> (`{r.name}`)" for r in visible_sorted]
     chunks: list[list[str]] = []
     cur: list[str] = []
     cur_len = 0
