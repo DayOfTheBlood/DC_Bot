@@ -606,6 +606,19 @@ async def reset(ctx):
     await ctx.send("Reset complete.")
     save_state()
 
+    mid = board_message_id.get(channel_id)
+    if mid:
+        try:
+            msg = await ctx.channel.fetch_message(mid)
+            await msg.delete()
+        except discord.NotFound:
+            pass  # schon weg
+        except discord.Forbidden:
+            # Optional: kurze Info, falls der Bot seine eigene Nachricht nicht löschen darf (sollte selten sein)
+            await ctx.send("I couldn't delete the existing board message (missing permissions).")
+        finally:
+            board_message_id.pop(channel_id, None)
+
 @bot.command()
 @has_any_role(STAFF_ROLES)
 async def bo3(ctx):
