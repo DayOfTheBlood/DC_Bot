@@ -119,6 +119,7 @@ SWAP_CONFIRM_TTL = 24 * 60 * 60
 CAPTAIN_ROLE_NAME = "Captain"
 MANAGER_ROLE_NAME = "Manager"
 ROSTER_EXCLUDE_NAMES = {"Coach", "Manager"}
+MAX_ACTIVE_PLAYERS = 10
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
@@ -126,6 +127,14 @@ ALLOWED_KILLER_KEYS = {
 def _member_team_roles(member: discord.Member) -> list[discord.Role]:
     team_ids = _team_role_ids_from_store(member.guild.id)
     return [r for r in member.roles if r.id in team_ids]
+
+def _is_exempt_from_roster(m: discord.Member) -> bool:
+    """True, wenn der Member NICHT als aktiver Spieler zählt (Coach/Manager)."""
+    return any(r.name in ROSTER_EXCLUDE_NAMES for r in m.roles)
+
+def _active_players_in_team(guild: discord.Guild, team_role: discord.Role) -> list[discord.Member]:
+    """Alle aktiven Spieler (ohne Coach/Manager) mit genau dieser Teamrolle."""
+    return [m for m in guild.members if team_role in m.roles and not _is_exempt_from_roster(m)]
 
 async def _delete_messages_later(*msgs: discord.Message, delay: int = 10):
     await asyncio.sleep(delay)
@@ -2077,6 +2086,15 @@ class TeamSwapConfirmView(discord.ui.View):
         if not self._is_target(interaction.user):
             await interaction.response.send_message("This request is not for you.", ephemeral=True)
             return
+        if not _is_exempt_from_roster(self.target):
+            current_players = _active_players_in_team(interaction.guild, self.to_role)
+            if len(current_players) >= MAX_ACTIVE_PLAYERS:
+                await interaction.response.send_message(
+                    f"Roster limit reached for {self.to_role.mention} "
+                    f"(max {MAX_ACTIVE_PLAYERS} active players). Try again later.",
+                    ephemeral=True
+                )
+                return
         # Zustand gegenprüfen (hat der User noch die 'from_role'?)
         current_team_roles = _member_team_roles(self.target)
         if not any(r.id == self.from_role.id for r in current_team_roles):
@@ -2129,6 +2147,15 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         return
 
     team_role = author_team_roles[0]
+
+    active_players = _active_players_in_team(ctx.guild, team_role)
+    target_is_exempt = _is_exempt_from_roster(member)
+    if not target_is_exempt and len(active_players) >= MAX_ACTIVE_PLAYERS:
+        await ctx.send(
+            f"Roster limit reached for {team_role.mention}: "
+            f"maximum **{MAX_ACTIVE_PLAYERS}** active players. (Managers/Coaches are exempt.)"
+        )
+    return
 
     current = _member_team_roles(member)
 
