@@ -201,11 +201,17 @@ def show_remaining_killers(channel_id):
         return None
 
 def announce_next_action(channel_id):
-    if tb_mode.get(channel_id) == "noTB":
+    mode = tb_mode.get(channel_id)
+
+    # Wenn TB bereits gesetzt oder automatisch entschieden ist:
+    if mode in ("TB", "resolved"):
+        return None  # kein "Next"-Text mehr anzeigen
+
+    if mode == "noTB":
         remaining = [
             k for k in killer_pool
-            if all(k != b[0] for b in bans[channel_id]) and all(
-                k != p[0] for p in picks[channel_id])
+            if all(k != b[0] for b in bans[channel_id])
+            and all(k != p[0] for p in picks[channel_id])
         ]
         if len(remaining) > 1:
             return f"Next action: **BAN** by {team_names[channel_id][turns[channel_id]]}"
@@ -223,7 +229,8 @@ def announce_next_action(channel_id):
         team_name = team_names[channel_id][team]
         return f"Next action: **{action.upper()}** by {team_name}."
     else:
-        return "Format completed. Use **!tb <Killer>** to select a Tiebreaker now or **!notb** to continiue banning."
+        # Hinweis: Buttons im Board benutzen, nicht mehr !tb/!notb
+        return "Format completed. Choose a Tiebreaker (Set TB) or choose No TB to continue banning."
 
 async def send_final_summary(ctx, channel_id):
     bans_text = "\n".join([
