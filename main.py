@@ -128,6 +128,11 @@ def _member_team_roles(member: discord.Member) -> list[discord.Role]:
     team_ids = _team_role_ids_from_store(member.guild.id)
     return [r for r in member.roles if r.id in team_ids]
 
+async def _temp_reply(ctx, content: str, *, delay: int = 10):
+    m = await ctx.send(content)
+    asyncio.create_task(_delete_messages_later(ctx.message, m, delay=delay))
+    return m
+
 def _is_exempt_from_roster(m: discord.Member) -> bool:
     """True, wenn der Member NICHT als aktiver Spieler zählt (Coach/Manager)."""
     return any(r.name in ROSTER_EXCLUDE_NAMES for r in m.roles)
@@ -2125,11 +2130,11 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         return
 
     if TEAM_MGMT_CHANNEL_ID and ctx.channel.id != TEAM_MGMT_CHANNEL_ID:
-        await ctx.send("Please use this command in the designated team management channel.")
-        return
+        return await _temp_reply(ctx, "Please use this command in the designated team management channel.")
 
     if member is None:
-        await ctx.send("Usage: `!add @User`")
+        msg = await ctx.send("Usage: `!add @User`")
+        asyncio.create_task(_delete_messages_later(ctx.message, msg, delay=10))
         return
 
     team_role_ids = _team_role_ids_from_store(ctx.guild.id)
@@ -2139,12 +2144,10 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
 
     author_team_roles = [r for r in ctx.author.roles if r.id in team_role_ids]
     if len(author_team_roles) == 0:
-        await ctx.send("You don't have a team role, so I can't infer which team to assign.")
-        return
+        return await _temp_reply(ctx, "You don't have a team role, so I can't infer which team to assign.")
     if len(author_team_roles) > 1:
         names = ", ".join(f"`{r.name}`" for r in author_team_roles)
-        await ctx.send(f"You have multiple team roles ({names}). Remove the extra one(s) first.")
-        return
+        return await _temp_reply(ctx, "You have multiple team roles ({names}). Remove the extra one(s) first.")
 
     team_role = author_team_roles[0]
 
