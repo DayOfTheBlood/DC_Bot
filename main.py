@@ -10,6 +10,7 @@ from pathlib import Path
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 killer_map_lookup = {
@@ -115,7 +116,9 @@ TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
 TEAM_SCAN_INTERVAL_SEC = 300
 TEAM_MGMT_CHANNEL_ID = 1409588957200515180
 SWAP_CONFIRM_TTL = 24 * 60 * 60
-
+CAPTAIN_ROLE_NAME = "Captain"
+MANAGER_ROLE_NAME = "Manager"
+ROSTER_EXCLUDE_NAMES = {"Coach", "Manager"}
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
@@ -179,12 +182,48 @@ async def _team_roles_autoscan_loop():
                 roles_between = _scan_team_roles_between(guild, start, end)
                 visible = [r for r in roles_between if not placeholder.fullmatch(r.name)]
                 visible_sorted = sorted(visible, key=lambda r: r.name.casefold())
+                teams_payload = []
+                for r in visible_sorted:
+                    # Mitglieder mit dieser Team-Rolle
+                    members = [m for m in guild.members if r in m.roles]
+                
+                    # Id-Sets für schnelle Checks
+                    captain_ids = {m.id for m in members if any(x.name == CAPTAIN_ROLE_NAME for x in m.roles)}
+                    manager_ids = {m.id for m in members if any(x.name == MANAGER_ROLE_NAME for x in m.roles)}
+                
+                    # Spieler = Mitglieder ohne ausgeschlossene Rollen
+                    def _is_excluded(mem: discord.Member) -> bool:
+                        return any(x.name in ROSTER_EXCLUDE_NAMES for x in mem.roles)
+                
+                    players = [m for m in members if not _is_excluded(m)]
+                
+                    # sauber sortieren
+                    _by_name = lambda m: m.display_name.casefold()
+                    capt_sorted = sorted((m for m in members if m.id in captain_ids), key=_by_name)
+                    mgrs_sorted = sorted((m for m in members if m.id in manager_ids), key=_by_name)
+                    players_sorted = sorted(players, key=_by_name)
+                
+                    teams_payload.append({
+                        "id": r.id,
+                        "name": r.name,
+                        "position": r.position,
+                        "counts": {
+                            "members": len(members),
+                            "players": len(players),
+                        },
+                        # Für den Command reichen IDs; Namen holen wir zur Anzeige live
+                        "captain_ids": list(captain_ids),
+                        "manager_ids": list(manager_ids),
+                        "member_ids": [m.id for m in members],
+                        "player_ids": [m.id for m in players_sorted],
+                    })
+
 
                 gid = str(guild.id)
                 store["guilds"][gid] = {
                     "updated_at": now_iso,
                     "anchors": {"start": start.id, "end": end.id},
-                    "teams": [{"id": r.id, "name": r.name, "position": r.position} for r in visible_sorted],
+                    "teams": teams_payload,
                 }
 
             _save_team_roles_store(store)
@@ -2182,6 +2221,84 @@ async def remove_member_from_team(ctx: commands.Context, member: discord.Member 
     info = await ctx.send(f"Removed {member.mention} from {team_role.mention}.")
     asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
+@bot.command(name="status")
+@has_any_role(STAFF_ROLES)  # optional: entfernen, wenn jeder abfragen darf
+async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
+    if ctx.guild is None:
+        await ctx.send("This command must be used in a server.")
+        return
+    if not team_name:
+        await ctx.send("Usage: `!status <team name>`")
+        return
+
+    store = _load_team_roles_store()
+    gdata = store.get("guilds", {}).get(str(ctx.guild.id))
+    if not gdata:
+        await ctx.send("No team role snapshot found yet. The autoscan runs every 5 minutes.")
+        return
+
+    teams = gdata.get("teams", [])
+    # Team suchen: case-insensitive, exakter Treffer bevorzugt, sonst eindeutiger Prefix
+    tn = team_name.strip().casefold()
+    exact = [t for t in teams if t.get("name", "").casefold() == tn]
+    cand = exact or [t for t in teams if t.get("name", "").casefold().startswith(tn)]
+    if not cand:
+        await ctx.send(f"No team found for `{team_name}`.")
+        return
+    if len(cand) > 1 and not exact:
+        names = ", ".join(f"`{t['name']}`" for t in cand[:5])
+        await ctx.send(f"Multiple teams match: {names} … be more specific.")
+        return
+    team = cand[0]
+
+    role_id = team["id"]
+    role = ctx.guild.get_role(role_id)
+
+    # IDs -> Member-Objekte (Fallback: Mention)
+    def _resolve(uid: int):
+        m = ctx.guild.get_member(uid)
+        return (m, (m.mention if m else f"<@{uid}>"), (m.display_name if m else f"User {uid}"))
+
+    captain_ids = team.get("captain_ids", [])
+    manager_ids = team.get("manager_ids", [])
+    player_ids = team.get("player_ids", [])
+
+    cap_resolved = [_resolve(i) for i in captain_ids]
+    mgr_resolved = [_resolve(i) for i in manager_ids]
+    ply_resolved = [_resolve(i) for i in player_ids]
+
+    # Sortierung für die Anzeige: Captain(s) → Manager(s) → übrige Spieler
+    # (Wir zeigen „Players“ ohne Manager/Coach; Capt/Manager separat oben)
+    by_name = lambda tup: tup[2].casefold()
+    cap_list = sorted(cap_resolved, key=by_name)
+    mgr_list = sorted(mgr_resolved, key=by_name)
+    # Spieler-Liste sollte keine Captains/Manager enthalten (aus Autoscan schon gefiltert)
+    ply_list = sorted(ply_resolved, key=by_name)
+
+    # Roster-Size (Spieler ohne Coach & Manager)
+    roster_size = team.get("counts", {}).get("players", len(ply_list))
+
+    def _fmt(list_tuples):
+        return "\n".join(x[1] for x in list_tuples) if list_tuples else "—"
+
+    emb = discord.Embed(
+        title=f"Team Status — {team.get('name', 'Unknown')}",
+        description=(f"Role: {role.mention if role else f'`{team.get('name','')}`'}"),
+        color=EMBED_COLOR,
+    )
+    emb.add_field(name="Roster size (players)", value=str(roster_size), inline=True)
+    emb.add_field(name="Captain", value=_fmt(cap_list), inline=True)
+    emb.add_field(name="Manager", value=_fmt(mgr_list), inline=True)
+
+    # Kompakte Gesamtübersicht (Captain → Manager → übrige Spieler)
+    lines = [*(x[1] for x in cap_list), *(x[1] for x in mgr_list), *(x[1] for x in ply_list)]
+    big = "\n".join(lines) if lines else "—"
+    emb.add_field(name="Players", value=big, inline=False)
+
+    updated = gdata.get("updated_at", "—")
+    emb.set_footer(text=f"Last autoscan: {updated}")
+
+    await ctx.send(embed=emb)
 
 
 
