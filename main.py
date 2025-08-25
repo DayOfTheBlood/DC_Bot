@@ -1643,20 +1643,20 @@ class DraftBoardView(discord.ui.View):
 
     @discord.ui.button(label="Set TB", style=discord.ButtonStyle.primary)
     async def btn_tb(self, interaction: discord.Interaction, button: discord.ui.Button):
-    cid = self.channel_id
-    if not await self._ensure_prereqs(interaction):
-        return
-    if actions_done[cid] < len(formats[cid]):
-        await interaction.response.send_message("The pick & ban phase is not finished yet.", ephemeral=True)
-        return
-    if tb_mode.get(cid) != "none":
-        await interaction.response.send_message("Tiebreaker already resolved.", ephemeral=True)
-        return
-
-    opts = _remaining_killers(cid)
-    if not opts:
-        await interaction.response.send_message("No killers remaining.", ephemeral=True)
-        return
+        cid = self.channel_id
+        if not await self._ensure_prereqs(interaction):
+            return
+        if actions_done[cid] < len(formats[cid]):
+            await interaction.response.send_message("The pick & ban phase is not finished yet.", ephemeral=True)
+            return
+        if tb_mode.get(cid) != "none":
+            await interaction.response.send_message("Tiebreaker already resolved.", ephemeral=True)
+            return
+    
+        opts = _remaining_killers(cid)
+        if not opts:
+            await interaction.response.send_message("No killers remaining.", ephemeral=True)
+            return
 
     class TBSelect(discord.ui.Select):
         def __init__(self, channel_id: int):
