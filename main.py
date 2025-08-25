@@ -1840,6 +1840,9 @@ async def teamscan_cmd(ctx: commands.Context):
 
     teams = _scan_team_roles_between(ctx.guild, start, end)
 
+    placeholder = re.compile(r"team\s*\d+$", re.IGNORECASE)
+    visible = [r for r in teams if not placeholder.fullmatch(r.name)]
+
     # persist per-guild
     store = _load_team_roles_store()
     gid = str(ctx.guild.id)
@@ -1847,7 +1850,7 @@ async def teamscan_cmd(ctx: commands.Context):
     store["guilds"][gid] = {
         "updated_at": datetime.utcnow().isoformat() + "Z",
         "anchors": {"start": start.id, "end": end.id},
-        "teams": [{"id": r.id, "name": r.name, "position": r.position} for r in teams],
+        "teams": [{"id": r.id, "name": r.name, "position": r.position} for r in visible],
     }
     _save_team_roles_store(store)
 
@@ -1857,7 +1860,7 @@ async def teamscan_cmd(ctx: commands.Context):
         return
 
     # hübsche Ausgabe (chunken, falls viele)
-    lines = [f"- <@&{r.id}> (`{r.name}`)" for r in sorted(teams, key=lambda x: x.position, reverse=False)]
+    lines = [f"- <@&{r.id}> (`{r.name}`)" for r in sorted(visible, key=lambda x: x.position, reverse=False)]
     chunks: list[list[str]] = []
     cur: list[str] = []
     cur_len = 0
@@ -1870,7 +1873,7 @@ async def teamscan_cmd(ctx: commands.Context):
 
     embed = discord.Embed(
         title="Team Roles Scan",
-        description=f"Anchors: Start <@&{start.id}> • End <@&{end.id}>\nFound **{len(teams)}** team role(s).",
+        description=f"Anchors: Start <@&{start.id}> • End <@&{end.id}>\nFound **{len(visible)}** team role(s).",
         color=EMBED_COLOR,
     )
     for i, chunk in enumerate(chunks, 1):
