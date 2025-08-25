@@ -120,6 +120,8 @@ CAPTAIN_ROLE_NAME = "Captain"
 MANAGER_ROLE_NAME = "Manager"
 ROSTER_EXCLUDE_NAMES = {"Coach", "Manager"}
 MAX_ACTIVE_PLAYERS = 10
+RESTRICT_ROLE_NAME = "X"
+EVENT_SCAN_INTERVAL_SEC = 300
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
@@ -148,6 +150,44 @@ async def _delete_messages_later(*msgs: discord.Message, delay: int = 10):
             await m.delete()
         except (discord.NotFound, discord.Forbidden):
             pass
+
+async def _remove_role_later(guild_id: int, member_id: int, role_id: int, delay_seconds: int):
+    await asyncio.sleep(max(1, delay_seconds))
+    try:
+        guild = bot.get_guild(guild_id) or await bot.fetch_guild(guild_id)
+        if not guild:
+            return
+        member = guild.get_member(member_id) or await guild.fetch_member(member_id)
+        role = guild.get_role(role_id)
+        if member and role and role in member.roles:
+            await member.remove_roles(role, reason="Auto-unrestrict after match window")
+    except Exception:
+        pass
+
+async def _maybe_apply_killer_restriction(member: discord.Member, to_role: discord.Role) -> str | None:
+    """Gibt Hinweis-Text zurück, falls die X-Rolle vergeben wurde."""
+    # Nächsten Match-Start dieses Teams aus dem Index holen
+    next_start = _match_index.get(member.guild.id, {}).get(to_role.id)
+    if not next_start:
+        return None
+
+    now = datetime.now(timezone.utc)
+    delta = next_start - now
+    if timedelta(0) <= delta <= timedelta(hours=2):
+        restrict = discord.utils.get(member.guild.roles, name=RESTRICT_ROLE_NAME)
+        if not restrict:
+            return f"Restrict role '{RESTRICT_ROLE_NAME}' not found."
+        if restrict not in member.roles:
+            try:
+                await member.add_roles(restrict, reason="Joined team <2h before next match")
+            except discord.Forbidden:
+                return "Missing permission to add restrict role."
+        # Auto-Removal: z.B. 4h nach Start
+        remove_after = int(delta.total_seconds()) + 4 * 3600
+        asyncio.create_task(_remove_role_later(member.guild.id, member.id, restrict.id, remove_after))
+        return f"Applied {restrict.mention} (next match starts <t:{int(next_start.timestamp())}:R>)."
+    return None
+
 
 def _load_team_roles_store() -> dict:
     if TEAM_ROLES_FILE.exists():
@@ -245,6 +285,71 @@ async def _team_roles_autoscan_loop():
             print(f"[teams autoscan] error: {e}")
         await asyncio.sleep(TEAM_SCAN_INTERVAL_SEC)
 
+_vs_re = re.compile(r"^\s*(.+?)\s+vs\.?\s+(.+?)\s*$", re.IGNORECASE)
+
+def _parse_vs_title(name: str) -> tuple[str, str] | None:
+    m = _vs_re.match(name or "")
+    if not m:
+        return None
+    a = m.group(1).strip()
+    b = m.group(2).strip()
+    return (a, b)
+
+def _find_team_role_by_name_from_store(guild: discord.Guild, team_name: str) -> discord.Role | None:
+    """Exakte Namenssuche über den JSON-Snapshot; fallback: reguläre Rollen-Suche."""
+    store = _load_team_roles_store()
+    data = store.get("guilds", {}).get(str(guild.id), {})
+    wanted = (team_name or "").casefold()
+    for t in data.get("teams", []):
+        if str(t.get("name","")).casefold() == wanted:
+            r = guild.get_role(int(t["id"]))
+            if r:
+                return r
+    # Fallback (nicht so verlässlich, aber praktisch)
+    return discord.utils.find(lambda r: r.name.casefold() == wanted, guild.roles)
+
+async def _events_autoscan_loop():
+    """Baut alle ~2min einen Index: Teamrolle -> nächster Match-Start (UTC)."""
+    global _match_index
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            for guild in bot.guilds:
+                try:
+                    events = await guild.fetch_scheduled_events()
+                except Exception:
+                    continue
+
+                per_team: dict[int, datetime] = {}
+                for ev in events:
+                    # Wir berücksichtigen nur geplante, zukünftige Events mit 'TeamA vs TeamB' im Titel
+                    if getattr(ev, "status", None) != discord.GuildScheduledEventStatus.scheduled:
+                        continue
+                    if not ev.start_time:
+                        continue
+                    start_utc = ev.start_time.astimezone(timezone.utc)
+                    if start_utc <= now:
+                        continue
+
+                    vs = _parse_vs_title(ev.name or "")
+                    if not vs:
+                        continue
+
+                    a_name, b_name = vs
+                    ra = _find_team_role_by_name_from_store(guild, a_name)
+                    rb = _find_team_role_by_name_from_store(guild, b_name)
+
+                    for role in (ra, rb):
+                        if not role:
+                            continue
+                        old = per_team.get(role.id)
+                        if old is None or start_utc < old:
+                            per_team[role.id] = start_utc
+
+                _match_index[guild.id] = per_team
+        except Exception as e:
+            print(f"[events autoscan] error: {e}")
+        await asyncio.sleep(EVENT_SCAN_INTERVAL_SEC)
 
 def has_any_role(allowed_roles):
 
@@ -553,6 +658,10 @@ async def on_ready():
     if not getattr(bot, "_team_autoscan_started", False):
         asyncio.create_task(_team_roles_autoscan_loop())
         bot._team_autoscan_started = True
+
+    if not getattr(bot, "_events_autoscan_started", False):
+        asyncio.create_task(_events_autoscan_loop())
+        bot._events_autoscan_started = True
 
     for cid, _ in list(board_message_id.items()):
         ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
@@ -2113,7 +2222,13 @@ class TeamSwapConfirmView(discord.ui.View):
         except discord.Forbidden:
             await interaction.response.send_message("I can't change roles (missing permissions / role hierarchy).", ephemeral=True)
             return
-        await self._finalize(interaction, f"✅ {self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).")
+        await self._finalize(interaction, f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).")
+        note = await _maybe_apply_killer_restriction(self.target, self.to_role)
+        extra = f"\n{note}" if note else ""
+        await self._finalize(interaction,
+            f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).{extra}"
+        )
+
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def btn_decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2193,6 +2308,11 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
     # 3) hat gar keine Teamrolle -> direkt zuweisen
     try:
         await member.add_roles(team_role, reason=f"Team assignment by {ctx.author} ({ctx.author.id})")
+        note = await _maybe_apply_killer_restriction(member, team_role)
+        msg = f"Added {team_role.mention} to {member.mention}."
+        if note:
+            msg += f"\n{note}"
+        await ctx.send(msg)
     except discord.Forbidden:
         await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
         return
