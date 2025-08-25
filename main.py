@@ -1678,20 +1678,20 @@ class DraftBoardView(discord.ui.View):
 
     @discord.ui.button(label="No TB", style=discord.ButtonStyle.secondary)
     async def btn_notb(self, interaction: discord.Interaction, button: discord.ui.Button):
-    cid = self.channel_id
-    if not await self._ensure_prereqs(interaction):
-        return
-    if actions_done[cid] < len(formats[cid]):
-        await interaction.response.send_message("The pick & ban phase is not finished yet.", ephemeral=True)
-        return
-    if tb_mode.get(cid) != "none":
-        await interaction.response.send_message("Tiebreaker already resolved.", ephemeral=True)
-        return
-
-    async with _lock_for_channel(cid):
-        msg = await _apply_notb(interaction, cid)
-        await _update_or_create_board(interaction.channel, force_existing=True)
-        await interaction.response.send_message(msg, ephemeral=True)
+        cid = self.channel_id
+        if not await self._ensure_prereqs(interaction):
+            return
+        if actions_done[cid] < len(formats[cid]):
+            await interaction.response.send_message("The pick & ban phase is not finished yet.", ephemeral=True)
+            return
+        if tb_mode.get(cid) != "none":
+            await interaction.response.send_message("Tiebreaker already resolved.", ephemeral=True)
+            return
+    
+        async with _lock_for_channel(cid):
+            msg = await _apply_notb(interaction, cid)
+            await _update_or_create_board(interaction.channel, force_existing=True)
+            await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="Undo", style=discord.ButtonStyle.secondary)
     async def btn_undo(self, interaction: discord.Interaction, button: discord.ui.Button):
