@@ -1136,18 +1136,69 @@ async def staffcommands(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command()
-@has_any_role(ALLOWED_ROLES)
-async def purge(ctx):
-    """Löscht alle Nachrichten im aktuellen Channel."""
-    await ctx.send("Deleting all massages...", delete_after=3)
+@bot.command(name="ppurge")
+@has_any_role(STAFF_ROLES)
+async def ppurge(ctx: commands.Context):
+    """Purge ALL messages in this channel after a y/n confirmation."""
+    prompt = await ctx.send("**Clear ALL messages in this channel?** Reply `y` to confirm or `n` to cancel. (auto-cancels in 20s)")
 
-    def always_true(msg):
-        return True
+    def _chk(m: discord.Message) -> bool:
+        return (
+            m.author.id == ctx.author.id
+            and m.channel.id == ctx.channel.id
+            and m.content.lower() in {"y", "yes", "n", "no"}
+        )
 
-    deleted = await ctx.channel.purge(check=always_true)
-    info = await ctx.send(f"{len(deleted)} Messages were deleted.",
-                          delete_after=5)
+    try:
+        reply: discord.Message = await bot.wait_for("message", check=_chk, timeout=20)
+    except asyncio.TimeoutError:
+        try:
+            await prompt.edit(content="Cancelled (no response).")
+            await prompt.delete(delay=5)
+        except Exception:
+            pass
+        return
+
+    if reply.content.lower() in {"n", "no"}:
+        try:
+            await prompt.edit(content="Cancelled.")
+            await reply.delete()
+            await prompt.delete(delay=5)
+        except Exception:
+            pass
+        return
+
+    # confirmed
+    deleted_total = 0
+    try:
+        while True:
+            batch = await ctx.channel.purge(limit=1000)
+            deleted_total += len(batch)
+            if len(batch) < 2:  # nothing (or only 1) left in range
+                break
+            await asyncio.sleep(0.3)
+    except discord.Forbidden:
+        await ctx.send("I don't have permission to manage messages here.", delete_after=8)
+        return
+    except discord.HTTPException:
+        pass  # fall through and report what we got
+
+    # try to remove the prompt/answer too (if still present)
+    for m in (prompt, reply):
+        try:
+            await m.delete()
+        except Exception:
+            pass
+
+    info = await ctx.send(
+        f"Deleted **{deleted_total}** messages. "
+        "(Discord only bulk-deletes messages younger than 14 days.)"
+    )
+    try:
+        await info.delete(delay=5)
+    except Exception:
+        pass
+
 
 @bot.command()
 async def pov(ctx):
@@ -1875,6 +1926,10 @@ async def board_cmd(ctx):
     """Create/update the status board in this channel."""
     await _update_or_create_board(ctx.channel)
     await ctx.message.add_reaction("✅")
+
+
+
+
 
 
 
