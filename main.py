@@ -113,6 +113,7 @@ running_timers = {}
 STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
 TEAM_SCAN_INTERVAL_SEC = 300
+TEAM_MGMT_CHANNEL_ID = 123456789012345678
 
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
@@ -125,6 +126,17 @@ def _load_team_roles_store() -> dict:
         except Exception:
             return {}
     return {}
+
+def _team_role_ids_from_store(guild_id: int) -> set[int]:
+    store = _load_team_roles_store()
+    teams = store.get("guilds", {}).get(str(guild_id), {}).get("teams", [])
+    out = set()
+    for t in teams:
+        try:
+            out.add(int(t["id"]))
+        except Exception:
+            continue
+    return out
 
 def _save_team_roles_store(store: dict):
     TEAM_ROLES_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1885,11 +1897,9 @@ async def teams_cmd(ctx: commands.Context):
         color=EMBED_COLOR,
     )
 
-    # Bereits alphabetisch gespeichert; zur Sicherheit nochmal nach name sortieren
     teams_sorted = sorted(teams, key=lambda t: t.get("name","").casefold())
     lines = [f"- <@&{t['id']}> (`{t['name']}`)" for t in teams_sorted]
 
-    # in 1024er Felder chunking
     chunk, chunk_len, parts = [], 0, []
     for ln in lines:
         if chunk_len + len(ln) + 1 > 900:
@@ -1906,6 +1916,59 @@ async def teams_cmd(ctx: commands.Context):
 
     await ctx.send(embed=embed)
 
+@bot.command(name="add")
+async def add_member_to_team(ctx: commands.Context, member: discord.Member | None = None):
+    """Weist dem genannten User die Teamrolle des Aufrufers zu (basierend auf den Anker-Teams)."""
+    if ctx.guild is None:
+        await ctx.send("This command must be used in a server.")
+        return
+
+    if TEAM_MGMT_CHANNEL_ID and ctx.channel.id != TEAM_MGMT_CHANNEL_ID:
+        await ctx.send("Please use this command in the designated team management channel.")
+        return
+
+    if member is None:
+        await ctx.send("Usage: `!add @User`")
+        return
+
+    team_role_ids = _team_role_ids_from_store(ctx.guild.id)
+    if not team_role_ids:
+        await ctx.send("No team roles snapshot found yet. Wait for the autoscan (every 5 min) or set up anchors.")
+        return
+
+    author_team_roles = [r for r in ctx.author.roles if r.id in team_role_ids]
+    if len(author_team_roles) == 0:
+        await ctx.send("You don't have a team role, so I can't infer which team to assign.")
+        return
+    if len(author_team_roles) > 1:
+        names = ", ".join(f"`{r.name}`" for r in author_team_roles)
+        await ctx.send(f"You have multiple team roles ({names}). Remove the extra one(s) first.")
+        return
+
+    team_role = author_team_roles[0]
+
+    target_team_roles = [r for r in member.roles if r.id in team_role_ids]
+    to_remove = [r for r in target_team_roles if r.id != team_role.id]
+    to_add = [] if any(r.id == team_role.id for r in target_team_roles) else [team_role]
+
+    try:
+        if to_remove:
+            await member.remove_roles(*to_remove, reason=f"Team reassignment by {ctx.author} ({ctx.author.id})")
+        if to_add:
+            await member.add_roles(*to_add, reason=f"Team assignment by {ctx.author} ({ctx.author.id})")
+    except discord.Forbidden:
+        await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
+        return
+    except discord.HTTPException:
+        await ctx.send("Role update failed due to an API error. Try again.")
+        return
+
+    removed_txt = f" removed: {', '.join(r.mention for r in to_remove)}" if to_remove else ""
+    added_txt = f" added: {', '.join(r.mention for r in to_add)}" if to_add else ""
+    if not removed_txt and not added_txt:
+        await ctx.send(f"No change: {member.mention} already has {team_role.mention}.")
+    else:
+        await ctx.send(f"Updated {member.mention}:{added_txt}{removed_txt}")
 
 
 
