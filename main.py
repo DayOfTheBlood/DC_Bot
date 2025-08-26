@@ -328,7 +328,7 @@ async def _team_roles_autoscan_loop():
                         "member_ids": [m.id for m in members],
                         "player_ids": [m.id for m in players_sorted],
                     })
-
+                gid = str(guild.id)
                 existing = store["guilds"].get(gid, {})
                 profiles = existing.get("profiles", {})
                 
