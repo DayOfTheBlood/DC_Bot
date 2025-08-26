@@ -2455,7 +2455,7 @@ async def remove_member_from_team(ctx: commands.Context, member: discord.Member 
     asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
 @bot.command(name="status")
-@has_any_role(STAFF_ROLES)  # optional: entfernen, wenn jeder abfragen darf
+@has_any_role(STAFF_ROLES)  # optional entfernen, wenn jeder darf
 async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
     if ctx.guild is None:
         await ctx.send("This command must be used in a server.")
@@ -2471,10 +2471,9 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
         return
 
     teams = gdata.get("teams", [])
-    # Team suchen: case-insensitive, exakter Treffer bevorzugt, sonst eindeutiger Prefix
     tn = team_name.strip().casefold()
-    exact = [t for t in teams if t.get("name", "").casefold() == tn]
-    cand = exact or [t for t in teams if t.get("name", "").casefold().startswith(tn)]
+    exact = [t for t in teams if str(t.get("name", "")).casefold() == tn]
+    cand = exact or [t for t in teams if str(t.get("name", "")).casefold().startswith(tn)]
     if not cand:
         await ctx.send(f"No team found for `{team_name}`.")
         return
@@ -2484,37 +2483,42 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
         return
     team = cand[0]
 
-    role_id = team["id"]
+    role_id = int(team["id"])
     role = ctx.guild.get_role(role_id)
 
-    # IDs -> Member-Objekte (Fallback: Mention)
+    # Profile-Index (pro Guild)
+    profiles: dict = gdata.get("profiles", {}) or {}
+
     def _resolve(uid: int):
         m = ctx.guild.get_member(uid)
-        return (
-            m,
-            (m.mention if m else f"<@{uid}>"),
-            (m.display_name if m else f"User {uid}"),
-            uid,  # <- id für Profil-Lookup
-        )
+        return (m, (m.mention if m else f"<@{uid}>"), (m.display_name if m else f"User {uid}"), int(uid))
 
     captain_ids = team.get("captain_ids", [])
     manager_ids = team.get("manager_ids", [])
     player_ids  = team.get("player_ids",  [])
 
-    cap_resolved = [_resolve(i) for i in captain_ids]
-    mgr_resolved = [_resolve(i) for i in manager_ids]
-    ply_resolved = [_resolve(i) for i in player_ids]
+    cap_resolved = [_resolve(int(i)) for i in captain_ids]
+    mgr_resolved = [_resolve(int(i)) for i in manager_ids]
+    ply_resolved = [_resolve(int(i)) for i in player_ids]
 
     by_name = lambda tup: tup[2].casefold()
     cap_list = sorted(cap_resolved, key=by_name)
     mgr_list = sorted(mgr_resolved, key=by_name)
     ply_list = sorted(ply_resolved, key=by_name)
 
-    # Roster-Size (Spieler ohne Coach & Manager)
     roster_size = team.get("counts", {}).get("players", len(ply_list))
 
-    def _fmt_simple(list_tuples):
-        return "\n".join(x[1] for x in list_tuples) if list_tuples else "—"
+    def _fmt_detailed(list_tuples):
+        if not list_tuples:
+            return "—"
+        lines = []
+        for _m, mention, _disp, uid in list_tuples:
+            prof = profiles.get(str(uid), {}) or {}
+            dbd  = prof.get("dbd_id")   or "-"
+            plat = prof.get("platform") or "-"
+            reg  = prof.get("region")   or "-"
+            lines.append(f"{mention}\n`{dbd}` • `{plat}` • `{reg}`")
+        return "\n".join(lines)
 
     role_display = role.mention if role else f"`{team.get('name', '')}`"
     emb = discord.Embed(
@@ -2523,26 +2527,21 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
         color=EMBED_COLOR,
     )
     emb.add_field(name="Roster size (players)", value=str(roster_size), inline=True)
-    emb.add_field(name="Captain", value=_fmt_simple(cap_list), inline=True)
-    emb.add_field(name="Manager", value=_fmt_simple(mgr_list), inline=True)
 
-    # Players: mit DBD/Platform/Region (Defaults "-")
-    player_lines = []
-    for m, mention, _disp, uid in ply_list:
-        prof = profiles.get(str(uid), {}) or {}
-        dbd  = (prof.get("dbd_id")  or "-")
-        plat = (prof.get("platform") or "-")
-        reg  = (prof.get("region")   or "-")
-        # zweizeilig: User, darunter Kurzinfo
-        player_lines.append(f"{mention}\n`{dbd}` • `{plat}` • `{reg}`")
-    players_block = "\n".join(player_lines) if player_lines else "—"
+    # Captain & Manager jetzt inkl. Details
+    emb.add_field(name="Captain", value=_fmt_detailed(cap_list), inline=True)
+    emb.add_field(name="Manager", value=_fmt_detailed(mgr_list), inline=True)
 
+    # Players inkl. Details
+    players_block = _fmt_detailed(ply_list)
     emb.add_field(name="Players", value=players_block, inline=False)
 
     updated = gdata.get("updated_at", "—")
     emb.set_footer(text=f"Last autoscan: {updated}")
 
     await ctx.send(embed=emb)
+
+
 
 
 
