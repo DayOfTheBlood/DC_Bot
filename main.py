@@ -2196,42 +2196,52 @@ class TeamSwapConfirmView(discord.ui.View):
             asyncio.create_task(_delete_messages_later(*(x for x in (self.message, self.origin_msg) if x), delay=10))
 
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
-    async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_target(interaction.user):
-            await interaction.response.send_message("This request is not for you.", ephemeral=True)
-            return
-        if not _is_exempt_from_roster(self.target):
-            current_players = _active_players_in_team(interaction.guild, self.to_role)
-            if len(current_players) >= MAX_ACTIVE_PLAYERS:
-                await interaction.response.send_message(
-                    f"Roster limit reached for {self.to_role.mention} "
-                    f"(max {MAX_ACTIVE_PLAYERS} active players). Try again later.",
-                    ephemeral=True
-                )
-                return
-        # Zustand gegenprüfen (hat der User noch die 'from_role'?)
-        current_team_roles = _member_team_roles(self.target)
-        if not any(r.id == self.from_role.id for r in current_team_roles):
-            await interaction.response.send_message("Your team role changed meanwhile. Please ask your captain to resend.", ephemeral=True)
-            return
-        # Wechsel durchführen
-        try:
-            await self.target.remove_roles(self.from_role, reason=f"Team swap (by {self.requester})")
-            if not any(r.id == self.to_role.id for r in self.target.roles):
-                await self.target.add_roles(self.to_role, reason=f"Team swap (by {self.requester})")
-        except discord.Forbidden:
-            await interaction.response.send_message("I can't change roles (missing permissions / role hierarchy).", ephemeral=True)
-            return
-        await self._finalize(interaction, f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).")
-        note = await _maybe_apply_killer_restriction(self.target, self.to_role)
-        extra = f"\n{note}" if note else ""
-        await self._finalize(
-            interaction,
-            f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).{extra}"
-            )
+@discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+    if not self._is_target(interaction.user):
+        await interaction.response.send_message("This request is not for you.", ephemeral=True)
+        return
 
+    # Roster-Limit prüfen (nur für aktive Spieler, nicht Manager/Coach)
+    if not _is_exempt_from_roster(self.target):
+        current_players = _active_players_in_team(interaction.guild, self.to_role)
+        if len(current_players) >= MAX_ACTIVE_PLAYERS:
+            await interaction.response.send_message(
+                f"Roster limit reached for {self.to_role.mention} "
+                f"(max {MAX_ACTIVE_PLAYERS} active players). Try again later.",
+                ephemeral=True
+            )
+            return
+
+    # Hat der User noch die alte Teamrolle?
+    current_team_roles = _member_team_roles(self.target)
+    if not any(r.id == self.from_role.id for r in current_team_roles):
+        await interaction.response.send_message(
+            "Your team role changed meanwhile. Please ask your captain to resend.", ephemeral=True
         )
+        return
+
+    # Wechsel durchführen
+    try:
+        await self.target.remove_roles(self.from_role, reason=f"Team swap (by {self.requester})")
+        if not any(r.id == self.to_role.id for r in self.target.roles):
+            await self.target.add_roles(self.to_role, reason=f"Team swap (by {self.requester})")
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "I can't change roles (missing permissions / role hierarchy).", ephemeral=True
+        )
+        return
+
+    # <2h vor Match? -> Restrict-Rolle setzen + Info
+    note = await _maybe_apply_killer_restriction(self.target, self.to_role)
+    extra = f"\n{note}" if note else ""
+
+    await self._finalize(
+        interaction,
+        f"✅ {self.target.mention} moved from {self.from_role.mention} to "
+        f"{self.to_role.mention} (by {self.requester.mention}).{extra}"
+    )
+
 
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
@@ -2277,6 +2287,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
             f"Roster limit reached for {team_role.mention}: "
             f"maximum **{MAX_ACTIVE_PLAYERS}** active players. (Managers/Coaches are exempt.)"
         )
+        asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
         return
 
     current = _member_team_roles(member)
