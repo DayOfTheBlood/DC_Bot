@@ -114,7 +114,6 @@ running_timers = {}
 
 STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
-TEAM_SCAN_INTERVAL_SEC = 300
 TEAM_MGMT_CHANNEL_ID = 1409588957200515180
 SWAP_CONFIRM_TTL = 24 * 60 * 60
 CAPTAIN_ROLE_NAME = "Captain"
@@ -122,10 +121,67 @@ MANAGER_ROLE_NAME = "Manager"
 ROSTER_EXCLUDE_NAMES = {"Coach", "Manager"}
 MAX_ACTIVE_PLAYERS = 10
 RESTRICT_ROLE_NAME = "X"
-EVENT_SCAN_INTERVAL_SEC = 300
+EVENT_SCAN_INTERVAL_SEC = 60
+TEAM_SCAN_INTERVAL_SEC = 60
+REGIONS = {"EU", "NAE", "NAW", "RU", "SA", "OCE"}
+PLATFORMS = {"PC", "PS", "XBOX", "SWITCH"}
+_ADD_SPLIT_RE = re.compile(r"\s*-\s*")                
+_DBD_ID_RE   = re.compile(r"^[^\s#]{1,32}#[A-Za-z0-9]{4}$")
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
 }
+
+def _save_player_profile(guild: discord.Guild, member: discord.Member, team_role: discord.Role,
+                         *, platform: str, region: str, dbdid: str):
+    store = _load_team_roles_store()
+    gkey = str(guild.id)
+    gobj = store.setdefault("guilds", {}).setdefault(gkey, {})
+    profiles = gobj.setdefault("profiles", {})
+    profiles[str(member.id)] = {
+        "team_role_id": int(team_role.id),
+        "platform": platform,
+        "region": region,
+        "dbd_id": dbdid,
+        "discord_name": member.display_name,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _save_team_roles_store(store)
+
+def _classify_add_token(tok: str) -> tuple[str, str] | None:
+    """Gibt ('platform'|'region'|'dbdid', wert) oder None zurück."""
+    t = tok.strip().strip("<>").strip()   # <...> erlauben
+    up = t.upper()
+    if up in PLATFORMS:
+        return ("platform", up)
+    if up in REGIONS:
+        return ("region", up)
+    if _DBD_ID_RE.match(t):
+        return ("dbdid", t)
+    return None
+
+def parse_add_tail(tail: str) -> tuple[str|None,str|None,str|None,str|None]:
+    """
+    tail: alles hinter der @Mention, getrennt durch ' - '
+    return: (platform, region, dbdid, error)
+    """
+    platform = region = dbdid = None
+    if not tail:
+        return None, None, None, "Missing data. Format: `!add @User - <Platform> - <Region> - <DBD_ID>`"
+
+    parts = [p for p in _ADD_SPLIT_RE.split(tail) if p.strip()]
+    for p in parts:
+        kind = _classify_add_token(p)
+        if not kind:
+            return None, None, None, f"Unrecognized part: `{p}`"
+        k, v = kind
+        if k == "platform": platform = v
+        elif k == "region": region = v
+        elif k == "dbdid": dbdid = v
+
+    missing = [lbl for lbl, val in [("Platform", platform), ("Region", region), ("DBD ID", dbdid)] if not val]
+    if missing:
+        return None, None, None, f"Missing: {', '.join(missing)}. Use e.g. `PC - EU - Name#1a2b`"
+    return platform, region, dbdid, None
 
 def _member_team_roles(member: discord.Member) -> list[discord.Role]:
     team_ids = _team_role_ids_from_store(member.guild.id)
@@ -273,12 +329,15 @@ async def _team_roles_autoscan_loop():
                         "player_ids": [m.id for m in players_sorted],
                     })
 
-
-                gid = str(guild.id)
+                -
+                existing = store["guilds"].get(gid, {})
+                profiles = existing.get("profiles", {})
+                
                 store["guilds"][gid] = {
                     "updated_at": now_iso,
                     "anchors": {"start": start.id, "end": end.id},
                     "teams": teams_payload,
+                    "profiles": profiles,
                 }
 
             _save_team_roles_store(store)
@@ -2148,21 +2207,18 @@ async def teams_cmd(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 class TeamSwapConfirmView(discord.ui.View):
-    def __init__(
-        self,
-        target: discord.Member,
-        from_role: discord.Role,
-        to_role: discord.Role,
-        requester: discord.Member,
-        origin_msg: discord.Message,
-        timeout: float = SWAP_CONFIRM_TTL,
-    ):
+    def __init__(self, target: discord.Member, from_role: discord.Role, to_role: discord.Role,
+                 requester: discord.Member, origin_msg: discord.Message, *,
+                 platform: str, region: str, dbdid: str, timeout: float = SWAP_CONFIRM_TTL):
         super().__init__(timeout=timeout)
         self.target = target
         self.from_role = from_role
         self.to_role = to_role
         self.requester = requester
         self.origin_msg = origin_msg
+        self.platform = platform
+        self.region = region
+        self.dbdid = dbdid
         self.message: discord.Message | None = None
 
     async def on_timeout(self):
@@ -2238,8 +2294,13 @@ async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.
 
     await self._finalize(
         interaction,
-        f"✅ {self.target.mention} moved from {self.from_role.mention} to "
+        f"{self.target.mention} moved from {self.from_role.mention} to "
         f"{self.to_role.mention} (by {self.requester.mention}).{extra}"
+    )
+
+    _save_player_profile(
+        interaction.guild, self.target, self.to_role,
+        platform=self.platform, region=self.region, dbdid=self.dbdid
     )
 
 
@@ -2252,8 +2313,7 @@ async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.
         await self._finalize(interaction, f"{self.target.mention} declined the team change to {self.to_role.mention}.")
 
 @bot.command(name="add")
-async def add_member_to_team(ctx: commands.Context, member: discord.Member | None = None):
-    """Weist dem genannten User die Teamrolle des Aufrufers zu (basierend auf den Anker-Teams)."""
+async def add_member_to_team(ctx: commands.Context, member: discord.Member | None = None, *, tail: str = ""):
     if ctx.guild is None:
         await ctx.send("This command must be used in a server.")
         return
@@ -2262,9 +2322,13 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         return await _temp_reply(ctx, "Please use this command in the designated team management channel.")
 
     if member is None:
-        msg = await ctx.send("Usage: `!add @User`")
-        asyncio.create_task(_delete_messages_later(ctx.message, msg, delay=10))
-        return
+        return await _temp_reply(ctx, "Usage: `!add @User - <Platform> - <Region> - <DBD_ID>`")
+
+    # Zusatzdaten parsen (Reihenfolge egal)
+    platform, region, dbdid, err = parse_add_tail(tail)
+    if err:
+        return await _temp_reply(ctx, f"{err}\nAllowed Platforms: {', '.join(sorted(PLATFORMS))}\n"
+                                      f"Allowed Regions: {', '.join(sorted(REGIONS))}")
 
     team_role_ids = _team_role_ids_from_store(ctx.guild.id)
     if not team_role_ids:
@@ -2280,59 +2344,64 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
 
     team_role = author_team_roles[0]
 
+    # Roster-Limit prüfen (nur aktive Spieler zählen, Manager/Coach exempt)
     active_players = _active_players_in_team(ctx.guild, team_role)
     target_is_exempt = _is_exempt_from_roster(member)
     if not target_is_exempt and len(active_players) >= MAX_ACTIVE_PLAYERS:
-        await ctx.send(
-            f"Roster limit reached for {team_role.mention}: "
-            f"maximum **{MAX_ACTIVE_PLAYERS}** active players. (Managers/Coaches are exempt.)"
+        info = await ctx.send(
+            f"Roster limit reached for {team_role.mention}: maximum **{MAX_ACTIVE_PLAYERS}** active players. "
+            f"(Managers/Coaches are exempt.)"
         )
         asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
         return
 
     current = _member_team_roles(member)
 
-    # 0) bereits im Zielteam?
+    # schon im Zielteam?
     if any(r.id == team_role.id for r in current):
         await ctx.send(f"No change: {member.mention} is already in {team_role.mention}.")
         return
-    
-    # 1) hat mehrere Teamrollen -> Admin-Fall, erst bereinigen
+
+    # mehrere Teamrollen -> erst bereinigen
     if len(current) > 1:
         names = ", ".join(r.mention for r in current)
         await ctx.send(f"{member.mention} has multiple team roles ({names}). Please clean this up first.")
         return
-    
-    # 2) hat genau eine andere Teamrolle -> Swap mit Bestätigung
+
+    # Wechsel (eine andere Teamrolle) -> Confirm View, Infos mitgeben
     if len(current) == 1:
         from_role = current[0]
         view = TeamSwapConfirmView(
             target=member, from_role=from_role, to_role=team_role,
-            requester=ctx.author, origin_msg=ctx.message, timeout=SWAP_CONFIRM_TTL
+            requester=ctx.author, origin_msg=ctx.message,
+            platform=platform, region=region, dbdid=dbdid,
+            timeout=SWAP_CONFIRM_TTL
         )
         msg = await ctx.send(
             content=(f"{member.mention} please confirm the team change:\n"
-                     f"From {from_role.mention} To {team_role.mention}\n"
-                     f"(Requested by {ctx.author.mention})"),
+                     f"From {from_role.mention} ➜ To {team_role.mention}\n"
+                     f"(Requested by {ctx.author.mention})\n"
+                     f"**Platform:** `{platform}` • **Region:** `{region}` • **DBD:** `{dbdid}`"),
             view=view
         )
         view.message = msg
         return
 
-    
-    # 3) hat gar keine Teamrolle -> direkt zuweisen
+    # keine Teamrolle -> direkt zuweisen + Profil speichern
     try:
         await member.add_roles(team_role, reason=f"Team assignment by {ctx.author} ({ctx.author.id})")
+        _save_player_profile(ctx.guild, member, team_role,
+                             platform=platform, region=region, dbdid=dbdid)
         note = await _maybe_apply_killer_restriction(member, team_role)
-        msg = f"Added {team_role.mention} to {member.mention}."
+        msg = f"Added {team_role.mention} to {member.mention}.\n" \
+              f"**Platform:** `{platform}` • **Region:** `{region}` • **DBD:** `{dbdid}`"
         if note:
             msg += f"\n{note}"
-        await ctx.send(msg)
+        info = await ctx.send(msg)
+        asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
     except discord.Forbidden:
         await ctx.send("I lack permission or my role is below the team role. Adjust role hierarchy/permissions.")
         return
-    info = await ctx.send(f"Added {member.mention} to {team_role.mention}.")
-    asyncio.create_task(_delete_messages_later(info, ctx.message, delay=10))
 
 @bot.command(name="remove")
 async def remove_member_from_team(ctx: commands.Context, member: discord.Member | None = None):
