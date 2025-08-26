@@ -106,6 +106,7 @@ team_names = {}
 coinflip_winner = {}
 coinflip_used = {}
 tiebreaker_picked = {}
+_match_index: dict[int, dict[int, datetime]] = {}
 
 EMBED_COLOR = 0x790000
 
@@ -2225,8 +2226,11 @@ class TeamSwapConfirmView(discord.ui.View):
         await self._finalize(interaction, f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).")
         note = await _maybe_apply_killer_restriction(self.target, self.to_role)
         extra = f"\n{note}" if note else ""
-        await self._finalize(interaction,
+        await self._finalize(
+            interaction,
             f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).{extra}"
+        )
+
         )
 
 
@@ -2235,7 +2239,7 @@ class TeamSwapConfirmView(discord.ui.View):
         if not self._is_target(interaction.user):
             await interaction.response.send_message("This request is not for you.", ephemeral=True)
             return
-        await self._finalize(interaction, f"❌ {self.target.mention} declined the team change to {self.to_role.mention}.")
+        await self._finalize(interaction, f"{self.target.mention} declined the team change to {self.to_role.mention}.")
 
 @bot.command(name="add")
 async def add_member_to_team(ctx: commands.Context, member: discord.Member | None = None):
@@ -2262,7 +2266,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         return await _temp_reply(ctx, "You don't have a team role, so I can't infer which team to assign.")
     if len(author_team_roles) > 1:
         names = ", ".join(f"`{r.name}`" for r in author_team_roles)
-        return await _temp_reply(ctx, "You have multiple team roles ({names}). Remove the extra one(s) first.")
+        return await _temp_reply(ctx, f"You have multiple team roles ({names}). Remove the extra one(s) first.")
 
     team_role = author_team_roles[0]
 
@@ -2273,7 +2277,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
             f"Roster limit reached for {team_role.mention}: "
             f"maximum **{MAX_ACTIVE_PLAYERS}** active players. (Managers/Coaches are exempt.)"
         )
-    return
+        return
 
     current = _member_team_roles(member)
 
