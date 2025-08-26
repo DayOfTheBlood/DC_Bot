@@ -2490,28 +2490,30 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
     # IDs -> Member-Objekte (Fallback: Mention)
     def _resolve(uid: int):
         m = ctx.guild.get_member(uid)
-        return (m, (m.mention if m else f"<@{uid}>"), (m.display_name if m else f"User {uid}"))
+        return (
+            m,
+            (m.mention if m else f"<@{uid}>"),
+            (m.display_name if m else f"User {uid}"),
+            uid,  # <- id für Profil-Lookup
+        )
 
     captain_ids = team.get("captain_ids", [])
     manager_ids = team.get("manager_ids", [])
-    player_ids = team.get("player_ids", [])
+    player_ids  = team.get("player_ids",  [])
 
     cap_resolved = [_resolve(i) for i in captain_ids]
     mgr_resolved = [_resolve(i) for i in manager_ids]
     ply_resolved = [_resolve(i) for i in player_ids]
 
-    # Sortierung für die Anzeige: Captain(s) → Manager(s) → übrige Spieler
-    # (Wir zeigen „Players“ ohne Manager/Coach; Capt/Manager separat oben)
     by_name = lambda tup: tup[2].casefold()
     cap_list = sorted(cap_resolved, key=by_name)
     mgr_list = sorted(mgr_resolved, key=by_name)
-    # Spieler-Liste sollte keine Captains/Manager enthalten (aus Autoscan schon gefiltert)
     ply_list = sorted(ply_resolved, key=by_name)
 
     # Roster-Size (Spieler ohne Coach & Manager)
     roster_size = team.get("counts", {}).get("players", len(ply_list))
 
-    def _fmt(list_tuples):
+    def _fmt_simple(list_tuples):
         return "\n".join(x[1] for x in list_tuples) if list_tuples else "—"
 
     role_display = role.mention if role else f"`{team.get('name', '')}`"
@@ -2521,13 +2523,21 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
         color=EMBED_COLOR,
     )
     emb.add_field(name="Roster size (players)", value=str(roster_size), inline=True)
-    emb.add_field(name="Captain", value=_fmt(cap_list), inline=True)
-    emb.add_field(name="Manager", value=_fmt(mgr_list), inline=True)
+    emb.add_field(name="Captain", value=_fmt_simple(cap_list), inline=True)
+    emb.add_field(name="Manager", value=_fmt_simple(mgr_list), inline=True)
 
-    # Kompakte Gesamtübersicht (Captain → Manager → übrige Spieler)
-    lines = [*(x[1] for x in cap_list), *(x[1] for x in mgr_list), *(x[1] for x in ply_list)]
-    big = "\n".join(lines) if lines else "—"
-    emb.add_field(name="Players", value=big, inline=False)
+    # Players: mit DBD/Platform/Region (Defaults "-")
+    player_lines = []
+    for m, mention, _disp, uid in ply_list:
+        prof = profiles.get(str(uid), {}) or {}
+        dbd  = (prof.get("dbd_id")  or "-")
+        plat = (prof.get("platform") or "-")
+        reg  = (prof.get("region")   or "-")
+        # zweizeilig: User, darunter Kurzinfo
+        player_lines.append(f"{mention}\n`{dbd}` • `{plat}` • `{reg}`")
+    players_block = "\n".join(player_lines) if player_lines else "—"
+
+    emb.add_field(name="Players", value=players_block, inline=False)
 
     updated = gdata.get("updated_at", "—")
     emb.set_footer(text=f"Last autoscan: {updated}")
