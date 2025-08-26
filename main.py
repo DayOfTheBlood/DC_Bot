@@ -2229,9 +2229,9 @@ class TeamSwapConfirmView(discord.ui.View):
         await self._finalize(
             interaction,
             f"{self.target.mention} moved from {self.from_role.mention} to {self.to_role.mention} (by {self.requester.mention}).{extra}"
-        )
+            )
 
-    )
+        )
 
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
