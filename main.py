@@ -7,6 +7,12 @@ from datetime import datetime, timedelta, timezone
 import json
 import asyncio
 from pathlib import Path
+try:
+    from zoneinfo import ZoneInfo  # stdlib
+except Exception:
+    ZoneInfo = None
+from typing import Optional, Literal
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -121,7 +127,17 @@ ATTENDANCE_EMOJI_IDS = {
 ATTENDANCE_ROLE_IDS = {"Caster": None, "Referee": None}
 ATTENDANCE_ROLE_NAMES = {"Caster", "Referee"}
 
-ATTENDANCE_TZ = ZoneInfo("Europe/Berlin")
+if ZoneInfo is not None:
+    ATTENDANCE_TZ = ZoneInfo("Europe/Berlin")
+else:
+    try:
+        import pytz  # optional
+        ATTENDANCE_TZ = pytz.timezone("Europe/Berlin")
+    except Exception:
+        from datetime import timezone, timedelta
+        # letzter Ausweg (ohne DST): CET+1 — nicht perfekt, aber der Bot bleibt lauffähig
+        ATTENDANCE_TZ = timezone(timedelta(hours=1))
+
 ATTENDANCE_STORE_FILE = Path(__file__).with_name("attendance_store.json")
 
 GSHEETS_KEYFILE = Path(__file__).with_name("google_service_account.json")
