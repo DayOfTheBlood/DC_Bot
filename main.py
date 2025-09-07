@@ -663,57 +663,95 @@ async def _find_thread_by_name(forum: discord.ForumChannel, title: str) -> disco
 
     def _match(th: discord.Thread) -> bool:
         nk = normalize_key(getattr(th, "name", "") or "")
-        # exakter Treffer oder gutmütiger Prefix-Match wie in deinem Original
         return nk == needle or nk.startswith(needle) or needle.startswith(nk)
 
-    # 1) Aktive Threads zuverlässig laden (nicht auf forum.threads-Cache verlassen)
+    # ---------- 1) AKTIVE THREADS verlässlich laden ----------
     try:
-        active = await forum.guild.fetch_active_threads()
-        active_threads = getattr(active, "threads", active)  # kompatibel zu verschiedenen libs
+        act = await forum.guild.fetch_active_threads()
+        active_threads = getattr(act, "threads", act)
         active_threads = [th for th in active_threads if th.parent_id == forum.id]
     except Exception:
-        # Fallback: evtl. leer, wenn Cache noch nicht befüllt
-        active_threads = list(getattr(forum, "threads", []))
+        active_threads = list(getattr(forum, "threads", []))  # Fallback (kann leer sein)
 
     for th in active_threads:
         if _match(th):
             return th
 
-    # 2) Archivierte Threads – API-abhängig:
-    #    a) Neue(r) discord.py: forum.fetch_archived_threads(...) mit .threads/.has_more
-    #    b) Andere Distros/Forks: forum.archived_threads(...) als Async-Iterator
-
-    async def _iter_archived(private: bool):
-        # Pfad (a): paginierende Fetch-API vorhanden
+    # ---------- 2) ARCHIVE: Hilfs-Iteratoren, die mehrere APIs abdecken ----------
+    async def _iter_public_archived():
+        # Variante A: neue discord.py mit fetch_archived_threads
         if hasattr(forum, "fetch_archived_threads"):
             before = None
             while True:
-                res = await forum.fetch_archived_threads(private=private, before=before, limit=100)
+                res = await forum.fetch_archived_threads(private=False, before=before, limit=100)
                 threads = getattr(res, "threads", [])
                 for th in threads:
                     yield th
-                has_more = bool(getattr(res, "has_more", False))
-                if not threads or not has_more:
+                if not threads or not getattr(res, "has_more", False):
                     break
                 before = threads[-1].last_message_id or threads[-1].id
-        else:
-            # Pfad (b): Async-Iterator; limit=None => bis zur Erschöpfung
-            # Signaturen variieren leicht – private/limit sind in den gängigen Forks gültig.
-            async for th in forum.archived_threads(private=private, limit=None):
-                yield th
+            return
 
-    # 2a) öffentliche Archive
-    async for th in _iter_archived(private=False):
+        # Variante B: Pycord/Disnake: archived_threads(limit=..., before=...)
+        if hasattr(forum, "archived_threads"):
+            before = None
+            while True:
+                try:
+                    # bevorzugt mit Paging-Parametern
+                    itr = forum.archived_threads(limit=100, before=before)
+                except TypeError:
+                    # ältere Signatur, keine kwargs
+                    itr = forum.archived_threads()
+                got_any = False
+                async for th in itr:
+                    got_any = True
+                    yield th
+                    before = th.last_message_id or th.id
+                if not got_any:
+                    break
+
+    async def _iter_private_archived():
+        # Variante A: neue discord.py
+        if hasattr(forum, "fetch_archived_threads"):
+            before = None
+            while True:
+                res = await forum.fetch_archived_threads(private=True, before=before, limit=100)
+                threads = getattr(res, "threads", [])
+                for th in threads:
+                    yield th
+                if not threads or not getattr(res, "has_more", False):
+                    break
+                before = threads[-1].last_message_id or threads[-1].id
+            return
+
+        # Variante B: Pycord/Disnake: private_archived_threads(...)
+        if hasattr(forum, "private_archived_threads"):
+            before = None
+            while True:
+                try:
+                    itr = forum.private_archived_threads(limit=100, before=before)
+                except TypeError:
+                    itr = forum.private_archived_threads()
+                got_any = False
+                async for th in itr:
+                    got_any = True
+                    yield th
+                    before = th.last_message_id or th.id
+                if not got_any:
+                    break
+
+    # ---------- 2a) öffentliche Archive ----------
+    async for th in _iter_public_archived():
         if _match(th):
             return th
 
-    # 2b) private Archive (falls Rechte; andernfalls einfach überspringen)
+    # ---------- 2b) private Archive (falls API/Permissions vorhanden) ----------
     try:
-        async for th in _iter_archived(private=True):
+        async for th in _iter_private_archived():
             if _match(th):
                 return th
-    except (discord.Forbidden, AttributeError):
-        # kein Zugriff oder API bietet private-Flag nicht an – ignorieren
+    except (discord.Forbidden, AttributeError, TypeError):
+        # kein Zugriff oder API existiert nicht → ignorieren
         pass
 
     return None
