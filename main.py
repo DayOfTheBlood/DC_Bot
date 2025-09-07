@@ -1402,7 +1402,7 @@ async def staffcommands(ctx):
     embed.add_field(name="!notb", value="Activates no-TB mode (ban until one killer remains).", inline=False)
     embed.add_field(name="!random", value="Randomly selects a killer from the pool.", inline=False)
     embed.add_field(name="!reset", value="Resets the draft state for this channel.", inline=False)
-    embed.add_field(name="!fluffy / !voum / !brian", value="Shows the streamer's Steam and DBD ID.", inline=False)
+    embed.add_field(name="!fluffy / !voum / !brian", value="Links the streamer's Platform and DBD ID.", inline=False)
     embed.add_field(name="", value="", inline=False)
     embed.add_field(name="", value="Note that all commands that start with '~' can be used by the teams too.", inline=False)
     
@@ -1477,7 +1477,7 @@ async def pov(ctx):
     embed = discord.Embed(
         title="Streaming Rules",
         description=
-        ("While streaming a match, a minimum stream delay of **15 minutes** is required "
+        ("While streaming a match, a minimum stream delay of **10 minutes** is required "
          "and your stream title must include `@DayOfTheBlood`.\n\n"
          "*Please note: Day of the Blood is not responsible for any cases of stream sniping.*"
          ),
