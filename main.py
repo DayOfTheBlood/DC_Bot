@@ -109,7 +109,10 @@ tiebreaker_picked = {}
 _match_index: dict[int, dict[int, datetime]] = {}
 
 EMBED_COLOR = 0x790000
-
+DEFAULT_FORUM_CHANNEL_ID = 1401038120916357140
+KILLER_FORUM_OVERRIDES: dict[str, int] = {
+    #für override
+}
 running_timers = {}
 
 STATE_FILE = Path(__file__).with_name("state.json")
@@ -417,13 +420,6 @@ def has_any_role(allowed_roles):
         return any(role in user_roles for role in allowed_roles)
 
     return commands.check(predicate)
-
-
-DEFAULT_FORUM_CHANNEL_ID = 1401038120916357140
-
-KILLER_FORUM_OVERRIDES: dict[str, int] = {
-    #für override
-}
 
 def init_channel(channel_id):
     if channel_id not in action_log:
