@@ -108,12 +108,213 @@ coinflip_used = {}
 tiebreaker_picked = {}
 _match_index: dict[int, dict[int, datetime]] = {}
 
+ATTENDANCE_CHANNEL_IDS: set[int] = {
+    123456789012345678,
+}
+# Custom-Emoji-IDs (IDs sind stabiler als Namen). Falls du die IDs noch nicht hast,
+# setze hier 0 und der Bot versucht per Name-Fallback ("r_letter_c", "r_letter_r", "r_cross03").
+ATTENDANCE_EMOJI_IDS = {
+    "C": 0,  # :r_letter_c:
+    "R": 0,  # :r_letter_r:
+    "X": 0,  # :r_cross03:
+}
+ATTENDANCE_ROLE_IDS = {"Caster": None, "Referee": None}
+ATTENDANCE_ROLE_NAMES = {"Caster", "Referee"}
+
+ATTENDANCE_TZ = ZoneInfo("Europe/Berlin")
+ATTENDANCE_STORE_FILE = Path(__file__).with_name("attendance_store.json")
+
+GSHEETS_KEYFILE = Path(__file__).with_name("google_service_account.json")
+GSHEETS_SPREADSHEET_NAME = "DotB Attendance"
+GSHEETS_SHEET_TITLE = "Attendance"
+GSHEETS_LOG_TITLE = "AT-Log"
+
+
 EMBED_COLOR = 0x790000
 DEFAULT_FORUM_CHANNEL_ID = 1401038120916357140
 KILLER_FORUM_OVERRIDES: dict[str, int] = {
     #für override
 }
 running_timers = {}
+
+attendance_store = {
+    "sessions": {},   # { "<guild_id>:<message_id>": {meta...} }
+    "finalized": {},  # { "<guild_id>:<message_id>": { snapshot, rows } }
+    "blacklist": {},  # { "<guild_id>": [user_id, ...] }
+}
+
+def _att_key(guild_id: int, message_id: int) -> str:
+    return f"{guild_id}:{message_id}"
+
+def _attendance_load_store():
+    global attendance_store
+    try:
+        if ATTENDANCE_STORE_FILE.exists():
+            attendance_store = json.loads(ATTENDANCE_STORE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
+def _attendance_save_store():
+    ATTENDANCE_STORE_FILE.write_text(json.dumps(attendance_store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+_date_re_full = re.compile(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$")
+_ts_re = re.compile(r"<t:(\d+)(?::[a-zA-Z])?>")
+
+def _is_date_anchor_message(msg: discord.Message) -> Optional[str]:
+    """
+    Returns 'YYYY-MM-DD' if content is exactly a date dd.mm.yyyy (no replies), else None.
+    """
+    if msg.reference:  # Anchors sind keine Replies
+        return None
+    m = _date_re_full.match((msg.content or "").strip())
+    if not m:
+        return None
+    d, mo, y = map(int, m.groups())
+    try:
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    except Exception:
+        return None
+
+def _extract_first_timestamp_dt(msg: discord.Message) -> Optional[datetime]:
+    """
+    Returns aware datetime (Europe/Berlin) for the first <t:UNIX> timestamp in message, else None.
+    """
+    m = _ts_re.search(msg.content or "")
+    if not m:
+        return None
+    try:
+        ts = int(m.group(1))
+        return datetime.fromtimestamp(ts, tz=ATTENDANCE_TZ)
+    except Exception:
+        return None
+
+def _resolve_role_id(guild: discord.Guild, role_name: str, role_id: Optional[int]) -> Optional[int]:
+    if role_id:
+        return role_id
+    r = discord.utils.find(lambda rr: rr.name == role_name, guild.roles)
+    return r.id if r else None
+
+def _resolve_roles(guild: discord.Guild) -> dict[str, Optional[int]]:
+    return {
+        name: _resolve_role_id(guild, name, ATTENDANCE_ROLE_IDS.get(name))
+        for name in ATTENDANCE_ROLE_NAMES
+    }
+
+def _emoji_id_from_reaction_emoji(e) -> Optional[int]:
+    # Works for Emoji / PartialEmoji; unicode returns None
+    try:
+        return int(getattr(e, "id", None) or 0) or None
+    except Exception:
+        return None
+
+def _resolve_emoji_ids(guild: discord.Guild) -> dict[str, Optional[int]]:
+    ids = dict(ATTENDANCE_EMOJI_IDS)  # copy
+    # Fallback per Name, falls IDs = 0
+    needed = {k for k, v in ids.items() if not v}
+    if needed:
+        by_name = {
+            "C": ("r_letter_c",),
+            "R": ("r_letter_r",),
+            "X": ("r_cross03",),
+        }
+        for k in needed:
+            for name in by_name.get(k, ()):
+                em = discord.utils.get(guild.emojis, name=name)
+                if em:
+                    ids[k] = em.id
+                    break
+    return ids
+
+def _guild_blacklist(guild_id: int) -> set[int]:
+    return set(attendance_store.get("blacklist", {}).get(str(guild_id), []))
+
+#------- ATTANDANCE TRACKER SHEET ----------
+
+def _try_import_gs():
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        return gspread, Credentials
+    except Exception:
+        return None, None
+
+def _gs_open_or_none():
+    if not GSHEETS_KEYFILE.exists():
+        return None
+    gspread, Credentials = _try_import_gs()
+    if not gspread:
+        return None
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(str(GSHEETS_KEYFILE), scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open(GSHEETS_SPREADSHEET_NAME)
+    # Attendance sheet
+    try:
+        ws_data = sh.worksheet(GSHEETS_SHEET_TITLE)
+    except Exception:
+        ws_data = sh.add_worksheet(title=GSHEETS_SHEET_TITLE, rows=1000, cols=8)
+        ws_data.append_row(["Date","SlotTime","User ID","Discord Name","Status","Snapshot Time","Note"])
+    # Log sheet
+    try:
+        ws_log = sh.worksheet(GSHEETS_LOG_TITLE)
+    except Exception:
+        ws_log = sh.add_worksheet(title=GSHEETS_LOG_TITLE, rows=1000, cols=6)
+        ws_log.append_row(["When","Guild","Channel","MessageID","Level","Message"])
+    return ws_data, ws_log
+
+def _att_sheets_append_rows(snapshot: dict, rows: list[dict]):
+    out = _gs_open_or_none()
+    if not out:
+        return
+    ws_data, _ = out
+    to_append = []
+    for r in rows:
+        to_append.append([
+            snapshot.get("date") or "",
+            snapshot.get("slot_time") or "",
+            str(r["user_id"]),
+            r["display_name"],
+            r["status"],
+            snapshot.get("snapshot_time") or "",
+            "",  # Note (frei editierbar)
+        ])
+    if to_append:
+        ws_data.append_rows(to_append, value_input_option="RAW")
+
+def _att_sheets_log(guild: discord.Guild, channel: discord.abc.GuildChannel, message_id: int, level: str, text: str):
+    out = _gs_open_or_none()
+    if not out:
+        return
+    _, ws_log = out
+    ws_log.append_row([
+        datetime.now(timezone.utc).isoformat(),
+        f"{guild.name} ({guild.id})",
+        f"{getattr(channel, 'name', '?')} ({getattr(channel, 'id', '?')})",
+        str(message_id),
+        level,
+        text,
+    ])
+
+def _roster_now(guild: discord.Guild, roles: dict[str, Optional[int]], blacklist: set[int]) -> set[int]:
+    caster_id = roles.get("Caster"); ref_id = roles.get("Referee")
+    ids = set()
+    for m in guild.members:
+        if m.bot:
+            continue
+        has_c = bool(caster_id and discord.utils.get(m.roles, id=caster_id))
+        has_r = bool(ref_id and discord.utils.get(m.roles, id=ref_id))
+        if has_c or has_r:
+            if m.id not in blacklist:
+                ids.add(m.id)
+    return ids
+
+def _finalize_at(anchor_date_ymd: str, slot_dt: Optional[datetime]) -> datetime:
+    """Return finalize time as aware UTC datetime."""
+    if slot_dt:
+        return slot_dt.astimezone(timezone.utc)
+    y, mo, d = map(int, anchor_date_ymd.split("-"))
+    dt_berlin = datetime(y, mo, d, 23, 59, 59, tzinfo=ATTENDANCE_TZ)
+    return dt_berlin.astimezone(timezone.utc)
 
 STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
@@ -2607,6 +2808,310 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
 
 
 
+
+
+
+async def _att_scan_channel(guild: discord.Guild, channel: discord.TextChannel, *, silent: bool = True):
+    """
+    Scannt den Channel:
+      - identifiziert Anker (Date-only Messages)
+      - mappt Replies (Games) auf ihren Anker
+      - aktualisiert Zwischenstände (C/R/X; NR interim)
+      - finalisiert fällige Sessions (append-only + optional Sheets)
+    Gibt (warnings, finalized_count) zurück.
+    """
+    warnings: list[str] = []
+    finalized_count = 0
+
+    # 1) Anker finden
+    anchors: dict[int, str] = {}  # anchor_msg_id -> 'YYYY-MM-DD'
+    async for msg in channel.history(limit=500, oldest_first=True):
+        ymd = _is_date_anchor_message(msg)
+        if ymd:
+            anchors[msg.id] = ymd
+
+    if not anchors:
+        return (warnings, finalized_count)  # nichts zu tun
+
+    # 2) Games finden (Replies auf Anker)
+    # Wir lesen erneut (oder du buffert obige), hier reicht eine zweite Schleife:
+    games: list[discord.Message] = []
+    async for msg in channel.history(limit=500, oldest_first=True):
+        if not msg.reference or not msg.reference.message_id:
+            continue
+        parent_id = msg.reference.message_id
+        if parent_id in anchors:
+            games.append(msg)
+
+    roles_map = _resolve_roles(guild)
+    emoji_ids = _resolve_emoji_ids(guild)
+    blacklist = _guild_blacklist(guild.id)
+
+    now_utc = datetime.now(timezone.utc)
+
+    for gm in games:
+        key = _att_key(guild.id, gm.id)
+        anchor_id = gm.reference.message_id
+        anchor_ymd = anchors.get(anchor_id)
+        if not anchor_ymd:
+            if not silent:
+                warnings.append(f"Game {gm.id}: Reply ohne gültigen Anker.")
+            continue
+
+        slot_dt = _extract_first_timestamp_dt(gm)  # Europe/Berlin oder None
+        fin_utc = _finalize_at(anchor_ymd, slot_dt)
+
+        ses = attendance_store["sessions"].setdefault(key, {
+            "guild_id": guild.id,
+            "channel_id": gm.channel.id,
+            "message_id": gm.id,
+            "anchor_message_id": anchor_id,
+            "anchor_date": anchor_ymd,              # YYYY-MM-DD
+            "slot_time": slot_dt.isoformat() if slot_dt else None,
+            "finalize_at": fin_utc.isoformat(),
+            "frozen": False,
+            "interim": {"C": [], "R": [], "X": [], "NR": []},
+            "last_scanned_at": None,
+        })
+
+        # Falls Meta sich geändert hat (z.B. Emoji-IDs später gesetzt), finalize_at bleibt aber stabil.
+        ses["anchor_date"] = anchor_ymd
+        ses["slot_time"] = slot_dt.isoformat() if slot_dt else None
+        ses["finalize_at"] = fin_utc.isoformat()
+
+        # 3) Reaktionen für C/R/X einlesen
+        present = {"C": set(), "R": set(), "X": set()}
+        # map der drei IDs für schnellen Vergleich
+        eid_C, eid_R, eid_X = emoji_ids.get("C"), emoji_ids.get("R"), emoji_ids.get("X")
+        if not (eid_C and eid_R and eid_X) and not silent:
+            warnings.append("Emoji-IDs fehlen (C/R/X). Fallback per Name versucht. Bitte konfigurieren.")
+
+        for react in gm.reactions:
+            rid = _emoji_id_from_reaction_emoji(react.emoji)
+            kind: Optional[Literal["C","R","X"]] = None
+            if rid == eid_C: kind = "C"
+            elif rid == eid_R: kind = "R"
+            elif rid == eid_X: kind = "X"
+            # Fallback per Name (nur wenn IDs fehlen)
+            if kind is None and not rid:
+                s = str(react.emoji)  # unicode fallback (hier eher nutzlos)
+            if kind is None and hasattr(react.emoji, "name"):
+                nm = getattr(react.emoji, "name", "") or ""
+                if nm == "r_letter_c": kind = "C"
+                elif nm == "r_letter_r": kind = "R"
+                elif nm == "r_cross03": kind = "X"
+
+            if not kind:
+                continue
+
+            # alle User für diese Reaction holen
+            try:
+                async for user in react.users():
+                    if user.bot:
+                        continue
+                    mem = guild.get_member(user.id)
+                    if not mem:
+                        continue
+                    # Staff-Filter + Blacklist
+                    has_caster = roles_map.get("Caster") and discord.utils.get(mem.roles, id=roles_map["Caster"])
+                    has_ref   = roles_map.get("Referee") and discord.utils.get(mem.roles, id=roles_map["Referee"])
+                    if (not has_caster and not has_ref) or (user.id in blacklist):
+                        continue
+                    present[kind].add(user.id)
+            except Exception:
+                if not silent:
+                    warnings.append(f"Reactions lesen fehlgeschlagen für Game {gm.id} (Emoji {kind}).")
+
+        # 4) Interim-NR errechnen (erlaubt; dein Wunsch)
+        roster = _roster_now(guild, roles_map, blacklist)
+        union_CRX = present["C"] | present["R"] | present["X"]
+        nr_now = {uid for uid in roster if uid not in union_CRX}
+
+        ses["interim"] = {
+            "C": sorted(present["C"]),
+            "R": sorted(present["R"]),
+            "X": sorted(present["X"]),
+            "NR": sorted(nr_now),
+        }
+        ses["last_scanned_at"] = datetime.now(timezone.utc).isoformat()
+
+        # 5) Finalisieren wenn fällig und noch nicht frozen
+        already_final = attendance_store["finalized"].get(key)
+        if not ses.get("frozen") and now_utc >= fin_utc:
+            # Final-Roster & Statusberechnung
+            final_roster = _roster_now(guild, roles_map, blacklist)
+            rows = []
+            for uid in sorted(final_roster):
+                # Status mit X-Dominanz
+                is_x = uid in present["X"]
+                c = uid in present["C"]
+                r = uid in present["R"]
+                if is_x:
+                    status = "X"
+                else:
+                    if c and r: status = "C+R"
+                    elif c: status = "C"
+                    elif r: status = "R"
+                    else: status = "NR"
+                mem = guild.get_member(uid)
+                dname = mem.display_name if mem else f"User {uid}"
+                rows.append({
+                    "user_id": uid,
+                    "display_name": dname,
+                    "react_c": c,
+                    "react_r": r,
+                    "react_x": is_x,
+                    "status": status,
+                })
+
+            snapshot = {
+                "date": anchor_ymd,
+                "slot_time": ses["slot_time"],  # ISO (Berlin) oder None
+                "snapshot_time": datetime.now(timezone.utc).isoformat(),
+            }
+            attendance_store["finalized"][key] = {
+                "meta": {
+                    "guild_id": guild.id,
+                    "message_id": gm.id,
+                    "channel_id": gm.channel.id,
+                    "anchor_message_id": anchor_id,
+                },
+                "snapshot": snapshot,
+                "rows": rows,
+            }
+            ses["frozen"] = True
+            finalized_count += 1
+
+            # Optional: Sheets-Append
+            try:
+                _att_sheets_append_rows(snapshot, rows)
+            except Exception:
+                # still silently continue; Warnung nur bei !ATupdate
+                if not silent:
+                    warnings.append(f"Sheets-Export fehlgeschlagen für Game {gm.id}.")
+
+    _attendance_save_store()
+    return (warnings, finalized_count)
+
+@bot.command(name="ATblacklist")
+@has_any_role(STAFF_ROLES)
+async def at_blacklist(ctx: commands.Context, action: str | None = None, member: discord.Member | None = None):
+    """
+    !ATblacklist add @User
+    !ATblacklist remove @User
+    !ATblacklist show
+    (gilt guild-weit für Attendance)
+    """
+    if ctx.guild is None:
+        return
+    gkey = str(ctx.guild.id)
+    attendance_store.setdefault("blacklist", {}).setdefault(gkey, [])
+    bl = set(attendance_store["blacklist"][gkey])
+
+    if action in {"add","remove"} and not member:
+        await ctx.send("Bitte @User angeben.")
+        return
+
+    if action == "add":
+        bl.add(member.id)
+        attendance_store["blacklist"][gkey] = sorted(bl)
+        _attendance_save_store()
+        await ctx.send(f"Blacklist: hinzugefügt {member.mention}.")
+    elif action == "remove":
+        bl.discard(member.id)
+        attendance_store["blacklist"][gkey] = sorted(bl)
+        _attendance_save_store()
+        await ctx.send(f"Blacklist: entfernt {member.mention}.")
+    else:
+        # show
+        if not bl:
+            await ctx.send("Blacklist ist leer.")
+        else:
+            names = []
+            for uid in sorted(bl):
+                m = ctx.guild.get_member(uid)
+                names.append(m.mention if m else f"<@{uid}>")
+            await ctx.send("Blacklist: " + ", ".join(names))
+
+@bot.command(name="ATupdate")
+@has_any_role(STAFF_ROLES)
+async def at_update(ctx: commands.Context):
+    """
+    Scannt alle Attendance-Channels:
+      - Anchors & Games erkennen (Reply-Struktur)
+      - Interim C/R/X/NR aktualisieren
+      - fällige Games finalisieren (Append-only + optional Sheets)
+    Gibt nur hier eine knappe Zusammenfassung & Warnungen aus.
+    """
+    if ctx.guild is None:
+        await ctx.send("Server-only.")
+        return
+    channels = []
+    for cid in ATTENDANCE_CHANNEL_IDS:
+        ch = ctx.guild.get_channel(cid) or await ctx.guild.fetch_channel(cid)
+        if isinstance(ch, discord.TextChannel):
+            channels.append(ch)
+
+    total_games = 0
+    total_final = 0
+    all_warnings = []
+
+    for ch in channels:
+        warnings, finalized = await _att_scan_channel(ctx.guild, ch, silent=False)
+        total_final += finalized
+        all_warnings.extend([f"#{ch.name}: {w}" for w in warnings])
+
+        # Für das Reporting: wie viele Games existieren (Sessions in diesem Channel)
+        # Schätzen über aktuelle Anchors/Replies:
+        anchors_count = 0
+        games_count = 0
+        async for m in ch.history(limit=500, oldest_first=True):
+            if _is_date_anchor_message(m):
+                anchors_count += 1
+            elif m.reference and m.reference.message_id:
+                if _is_date_anchor_message(await ch.fetch_message(m.reference.message_id)):
+                    games_count += 1
+        total_games += games_count
+
+        # Optionale Sheet-Logs der Warnungen
+        for w in warnings[:20]:  # nicht spammen
+            _att_sheets_log(ctx.guild, ch, 0, "WARN", w)
+
+    summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert."
+    if all_warnings:
+        # zeige nur die ersten ~8 Warnungen, Rest andeuten
+        head = "\n".join(f"• {w}" for w in all_warnings[:8])
+        more = f"\n(+{len(all_warnings)-8} weitere…)" if len(all_warnings) > 8 else ""
+        await ctx.send(f"{summary}\nWarnungen:\n{head}{more}")
+    else:
+        await ctx.send(summary)
+
+async def _attendance_autoscan_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for g in bot.guilds:
+                channels = []
+                for cid in ATTENDANCE_CHANNEL_IDS:
+                    ch = g.get_channel(cid) or await g.fetch_channel(cid)
+                    if isinstance(ch, discord.TextChannel):
+                        channels.append(ch)
+                for ch in channels:
+                    await _att_scan_channel(g, ch, silent=True)
+        except Exception as e:
+            # keine Bot-Messages; optional ins Sheet loggen
+            try:
+                _att_sheets_log(g, ch, 0, "ERROR", f"autoscan: {e}")
+            except Exception:
+                pass
+        await asyncio.sleep(3600)  # stündlich
+
+# In on_ready() ergänzen (am ENDE der Funktion, nach deinen anderen Tasks):
+# ADD (einmalig starten, Flag wie bei deinen anderen Loops):
+    _attendance_load_store()
+    if not getattr(bot, "_attendance_autoscan_started", False):
+        asyncio.create_task(_attendance_autoscan_loop())
+        bot._attendance_autoscan_started = True
 
 
 
