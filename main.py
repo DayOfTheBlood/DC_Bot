@@ -661,42 +661,47 @@ async def _get_forum_channel(guild: discord.Guild, killer: str) -> discord.Forum
 async def _find_thread_by_name(forum: discord.ForumChannel, title: str) -> discord.Thread | None:
     needle = normalize_key(title)
 
-    # aktive Threads
-    for th in forum.threads:
-        name_key = normalize_key(th.name)
-        if name_key == needle:
-            return th
-    for th in forum.threads:
-        name_key = normalize_key(th.name)
-        if name_key.startswith(needle) or needle.startswith(name_key):
+    def _match(th: discord.Thread) -> bool:
+        nk = normalize_key(th.name or "")
+        return nk == needle or nk.startswith(needle) or needle.startswith(nk)
+
+    # 1) Aktive Threads verlässlich laden (über Guild)
+    try:
+        active = await forum.guild.fetch_active_threads()
+        active_threads = [th for th in active.threads if th.parent_id == forum.id]
+    except Exception:
+        # Fallback: Cache (kann leer sein)
+        active_threads = list(getattr(forum, "threads", []))
+
+    for th in active_threads:
+        if _match(th):
             return th
 
-    # archivierte (öffentlich)
-    try:
-        archived = await forum.fetch_archived_threads(private=False, limit=100)
-        for th in archived.threads:
-            name_key = normalize_key(th.name)
-            if name_key == needle:
+    # 2) Archivierte Threads (public) – paginiert
+    before = None
+    while True:
+        res = await forum.fetch_archived_threads(private=False, before=before, limit=100)
+        threads = res.threads
+        for th in threads:
+            if _match(th):
                 return th
-        for th in archived.threads:
-            name_key = normalize_key(th.name)
-            if name_key.startswith(needle) or needle.startswith(name_key):
-                return th
-    except Exception:
-        pass
+        if not threads or not res.has_more:
+            break
+        before = threads[-1].last_message_id or threads[-1].id
 
-    # archivierte (privat), falls Berechtigungen
+    # 3) Archivierte Threads (private) – paginiert (falls Rechte)
     try:
-        archived_private = await forum.fetch_archived_threads(private=True, limit=100)
-        for th in archived_private.threads:
-            name_key = normalize_key(th.name)
-            if name_key == needle:
-                return th
-        for th in archived_private.threads:
-            name_key = normalize_key(th.name)
-            if name_key.startswith(needle) or needle.startswith(name_key):
-                return th
-    except Exception:
+        before = None
+        while True:
+            res = await forum.fetch_archived_threads(private=True, before=before, limit=100)
+            threads = res.threads
+            for th in threads:
+                if _match(th):
+                    return th
+            if not threads or not res.has_more:
+                break
+            before = threads[-1].last_message_id or threads[-1].id
+    except discord.Forbidden:
         pass
 
     return None
