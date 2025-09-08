@@ -373,13 +373,6 @@ def _sheet_read_block(ws, start: int, height: int) -> tuple[dict[str, str], list
 def _att_sheets_upsert_block(session_key: str, date_label: str,
                              user_rows: list[tuple[str, int, str]],
                              finalized: bool) -> bool:
-    """
-    Upsert eines Game-Blocks:
-      session_key: "<guild_id>:<message_id>"
-      date_label:  "YYYY-MM-DD" (nur im Header in A)
-      user_rows:   [(display_name, user_id, status), ...]
-      finalized:   True => Header rot, sonst grün
-    """
     ws = _ws_data_or_none()
     if not ws:
         return False
@@ -393,7 +386,6 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
         ws.insert_rows([[""] * SHEET_NUM_COLS] * needed_height, row=GSHEETS_START_ROW)
         _sheet_shift_indices(GSHEETS_START_ROW, needed_height)
         start = GSHEETS_START_ROW
-        slot_label = _att_slot_label_for_date(date_key)
         block = {"start": start, "height": needed_height, "finalized": bool(finalized)}
         blocks[session_key] = block
     else:
@@ -401,21 +393,19 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
         current_h = int(block.get("height", 1))
         if needed_height > current_h:
             add = needed_height - current_h
-            # unter dem Header nachschieben
             ws.insert_rows([[""] * SHEET_NUM_COLS] * add, row=start + 1)
-            slot_label = _att_slot_label_for_date(date_key)
             _sheet_shift_indices(start + 1, add)
             block["height"] = current_h + add
 
     # existierende Notes per User-ID konservieren
     id_to_note, _order = _sheet_read_block(ws, block["start"], block["height"])
 
-    # Header schreiben + einfärben
-    slot_label = _att_slot_label_for_date(date_key)
+    # --- Header schreiben + einfärben ---
+    slot_label = _att_slot_label_for_date(date_label)  # <— HIER richtig
     ws.update(f"A{block['start']}:D{block['start']}", [[date_label, slot_label, "", ""]])
     _sheet_format_header(ws, block["start"], finalized)
 
-    # Body schreiben (A:D), Notes per ID wieder einsetzen
+    # Body schreiben
     body = []
     for name, uid, status in user_rows:
         note = id_to_note.get(str(uid), "")
@@ -424,7 +414,6 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
     if body:
         ws.update(f"A{block['start']+1}:D{block['start']+len(body)}", body, value_input_option="RAW")
 
-    # Block-Metadaten aktualisieren
     block["finalized"] = bool(finalized)
     block["height"] = 1 + len(body)
     _attendance_save_store()
@@ -3394,34 +3383,127 @@ async def at_update(ctx: commands.Context):
         await ctx.send(summary)
 
 async def _attendance_autoscan_loop():
+    """
+    Läuft stündlich:
+      1) scannt alle konfigurierten Attendance-Channels (silent=True) -> aktualisiert sessions/interim/finalized
+      2) schreibt/aktualisiert für JEDE Session einen Block im Sheet (ab GSHEETS_START_ROW),
+         inkl. Datums-Header (Spalte A) + Slot-Zeiten (Spalte B) + Zeilen: Name | UserID | Status | Note
+      3) finalisierte Sessions bleiben eingefroren; nur aktive Blöcke wachsen (wenn neue Staff hinzukommt)
+    """
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
-            for g in bot.guilds:
-                all_live_rows: list[list[str]] = []
-
-                # Channels einsammeln
+            for guild in bot.guilds:
+                # --- 1) Channels bestimmen & scannen ---
                 channels: list[discord.TextChannel] = []
                 for cid in ATTENDANCE_CHANNEL_IDS:
-                    ch = g.get_channel(cid) or await g.fetch_channel(cid)
+                    ch = guild.get_channel(cid) or await guild.fetch_channel(cid)
                     if isinstance(ch, discord.TextChannel):
                         channels.append(ch)
 
-                # Scannen + Live-Zeilen sammeln
                 for ch in channels:
-                    _, _, live_rows = await _att_scan_channel(
-                        g, ch, silent=True, collect_live_rows=True
-                    )
-                    all_live_rows.extend(live_rows)
+                    # aktualisiert attendance_store["sessions"] & ggf. ["finalized"]
+                    await _att_scan_channel(guild, ch, silent=True)
 
-        except Exception as e:
-            # optional ins LOGS-Sheet schreiben
+                # --- 2) Alle Sessions dieses Guilds (nur die o.g. Channels) -> Sheet upserten ---
+                channel_ids = {c.id for c in channels}
+                sessions = attendance_store.get("sessions", {})
+                finals   = attendance_store.get("finalized", {})
+
+                # Hilfsfunktion: ISO-Zeit -> datetime für Sortierung (höhere Zeiten später einfügen => oben stehen)
+                def _slot_dt(ses: dict) -> datetime:
+                    s = ses.get("slot_time") or ""
+                    try:
+                        dt = datetime.fromisoformat(s)
+                        if dt.tzinfo is None:
+                            # naive -> als Berlin interpretieren
+                            return datetime.fromisoformat(s).replace(tzinfo=ATTENDANCE_TZ)
+                        return dt
+                    except Exception:
+                        # kein Slot -> weit in die Zukunft, damit Sessions MIT Zeit zuerst einsortiert werden
+                        return datetime.max.replace(tzinfo=timezone.utc)
+
+                # Sessions dieses Guilds + Channels einsammeln
+                sess_list: list[tuple[str, dict]] = []
+                for skey, ses in sessions.items():
+                    if ses.get("guild_id") == guild.id and ses.get("channel_id") in channel_ids:
+                        sess_list.append((skey, ses))
+
+                # Sortieren nach Datum, dann Slotzeit (frühe zuerst) — weil wir "von alt nach neu" einfügen,
+                # damit die späteren Einsätze im Sheet weiter nach oben rücken.
+                def _sort_key(item: tuple[str, dict]):
+                    _, ses = item
+                    return (ses.get("anchor_date") or "", _slot_dt(ses))
+                sess_list.sort(key=_sort_key)
+
+                for skey, ses in sess_list:
+                    try:
+                        # --- User-Zeilen aus "interim" bauen ---
+                        interim = ses.get("interim", {}) or {}
+                        # Status-Priorität: X dominiert; dann C+R; dann C / R; sonst NR
+                        # Wir bauen eine Map uid -> Status
+                        c_set = set(interim.get("C", []))
+                        r_set = set(interim.get("R", []))
+                        x_set = set(interim.get("X", []))
+                        nr_set = set(interim.get("NR", []))
+
+                        all_uids = sorted(set().union(c_set, r_set, x_set, nr_set))
+                        user_rows: list[tuple[str, int, str]] = []
+                        for uid in all_uids:
+                            if uid in x_set:
+                                status = "X"
+                            else:
+                                c = uid in c_set
+                                r = uid in r_set
+                                if c and r: status = "C+R"
+                                elif c:      status = "C"
+                                elif r:      status = "R"
+                                else:        status = "NR"
+                            mem = guild.get_member(uid)
+                            dname = mem.display_name if mem else f"User {uid}"
+                            user_rows.append((dname, uid, status))
+
+                        # --- Final-Flag bestimmen ---
+                        is_frozen  = bool(ses.get("frozen"))
+                        is_final   = is_frozen or (skey in finals)
+
+                        # --- Datumslabel (YYYY-MM-DD) holen ---
+                        date_label = ses.get("anchor_date") or ""
+                        if not date_label:
+                            # sollte nicht vorkommen (wird im Scan gesetzt), Sicherheitsnetz
+                            continue
+
+                        # Upsert in die Tabelle (inkl. Datumskopf + Slotliste in Spalte B)
+                        ok = _att_sheets_upsert_block(
+                            session_key=skey,
+                            date_label=date_label,
+                            user_rows=user_rows,
+                            finalized=is_final
+                        )
+                        if not ok:
+                            # optional loggen
+                            _att_sheets_log(guild, guild.text_channels[0] if guild.text_channels else None,
+                                            0, "WARN", f"Sheet (interim) fehlgeschlagen für Game {skey}: upsert False")
+
+                    except Exception as e:
+                        # je Channel protokollieren
+                        try:
+                            _att_sheets_log(guild, guild.text_channels[0] if guild.text_channels else None,
+                                            0, "WARN", f"Sheet (interim) fehlgeschlagen für Game {skey}: {e}")
+                        except Exception:
+                            pass
+
+        except Exception as outer:
+            # Grobfehler einmal protokollieren
             try:
-                _att_sheets_log(g, ch, 0, "ERROR", f"autoscan: {e}")
+                _att_sheets_log(guild, guild.text_channels[0] if guild.text_channels else None,
+                                0, "ERROR", f"autoscan loop: {outer}")
             except Exception:
                 pass
 
-        await asyncio.sleep(3600)  # stündlich
+        # --- 3) schlafen bis zum nächsten Durchlauf ---
+        await asyncio.sleep(3600)
+
 
 
 
