@@ -378,15 +378,14 @@ def _att_sheets_upsert_block(
     finalized: bool
 ) -> None:
     """
-    Je *Game* genau ein Header:
+    Pro Game genau ein Header:
       A: Datum (YYYY-MM-DD)
       B: Uhrzeit (HH:MM CET)
     Darunter User-Zeilen:
       A: Name, B: User-ID, C: Status, D: Note (leer)
-    - Header wird NIE mit anderen Games zusammengeführt.
-    - Beim ersten Anlegen: grün (aktiv) oder rot (finalisiert).
-    - Bei Updates: wenn finalized=True -> rot färben; ansonsten Farbe lassen.
-    - Der gesamte User-Block unter dem Header wird ersetzt.
+    - Header wird nicht mit anderen Games zusammengeführt.
+    - Beim Einfügen von User-Zeilen wird deren Format explizit auf "normal" gesetzt,
+      dann erst der Header gefärbt (grün=aktiv, rot=final).
     """
     import re
 
@@ -398,6 +397,26 @@ def _att_sheets_upsert_block(
     START_ROW = 10
     DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     TIME_RX = re.compile(r"^\d{2}:\d{2}$")
+
+    def _format_header(row: int, is_final: bool):
+        color = {"red": 0.9, "green": 0.2, "blue": 0.2} if is_final else {"red": 0.0, "green": 0.8, "blue": 0.0}
+        try:
+            ws_data.format(f"A{row}:E{row}", {
+                "backgroundColor": color,
+                "textFormat": {"bold": True}
+            })
+        except Exception:
+            pass
+
+    def _format_users_plain(r1: int, r2: int):
+        if r2 >= r1:
+            try:
+                ws_data.format(f"A{r1}:E{r2}", {
+                    "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                    "textFormat": {"bold": False}
+                })
+            except Exception:
+                pass
 
     # --- 1) Header (Datum+Zeit) suchen ---
     colA = ws_data.col_values(1)  # Datum
@@ -411,35 +430,17 @@ def _att_sheets_upsert_block(
             header_row = i
             break
 
-    # --- 2) Header anlegen (immer einzelne Zeile) ---
+    # --- 2) Header anlegen (OHNE Format) ---
     if header_row is None:
         ws_data.insert_row(["", "", "", ""], index=START_ROW)
         header_row = START_ROW
         ws_data.update(f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
-
-        # Farbe je nach Status
-        try:
-            color = {"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}
-            ws_data.format(f"A{header_row}:E{header_row}", {
-                "backgroundColor": color,
-                "textFormat": {"bold": True}
-            })
-        except Exception:
-            pass
     else:
-        # existierender Header -> Uhrzeit korrigieren (sollte identisch sein) und ggf. auf rot setzen
+        # existierender Header -> Uhrzeit sicherstellen
         if (ws_data.cell(header_row, 2).value or "") != (slot_time_label or ""):
             ws_data.update_cell(header_row, 2, slot_time_label or "")
-        if finalized:
-            try:
-                ws_data.format(f"A{header_row}:E{header_row}", {
-                    "backgroundColor": {"red": 0.9, "green": 0.2, "blue": 0.2},
-                    "textFormat": {"bold": True}
-                })
-            except Exception:
-                pass
 
-    # --- 3) Blockgrenzen bestimmen (bis zum nächsten Header: Datum+Zeit) ---
+    # --- 3) Blockgrenzen bestimmen (bis zum nächsten Header) ---
     colA = ws_data.col_values(1)
     colB = ws_data.col_values(2)
     nrows = max(len(colA), len(colB))
@@ -450,18 +451,19 @@ def _att_sheets_upsert_block(
         a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
         b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
         if DATE_RX.match(a) and TIME_RX.match(b):
-            break  # nächster Game-Header beginnt hier
+            break  # nächster Game-Header
         block_end = i
 
-    # --- 4) Alten User-Block unter diesem Header löschen ---
+    # --- 4) Alten User-Block löschen ---
     if block_end >= block_start:
         try:
             ws_data.delete_rows(block_start, block_end - block_start + 1)
         except Exception:
-            pass  # falls nichts da/Fehler – nicht kritisch
+            pass
 
-    # --- 5) Neuen User-Block einfügen ---
+    # --- 5) Neue User-Zeilen einfügen + befüllen ---
     if user_rows:
+        # Einfügen direkt unter dem Header (vererbt evtl. Header-Format -> resetten wir gleich)
         ws_data.insert_rows([["", "", "", ""] for _ in range(len(user_rows))], row=header_row + 1)
         values = [[dn, str(uid), status, ""] for dn, uid, status in user_rows]
         ws_data.update(
@@ -469,6 +471,11 @@ def _att_sheets_upsert_block(
             values,
             value_input_option="RAW",
         )
+        # --- 6) User-Bereich aktiv auf "plain" setzen (weiß, nicht fett) ---
+        _format_users_plain(header_row + 1, header_row + len(user_rows))
+
+    # --- 7) Header zuletzt formatieren (damit User-Zeilen NICHT das Format erben) ---
+    _format_header(header_row, bool(finalized))
 
 def _att_sheets_mark_finalized(session_key: str):
     ws = _ws_data_or_none()
