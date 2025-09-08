@@ -301,7 +301,7 @@ def _gs_open_or_none():
         ws_log.append_row(["When","Guild","Channel","MessageID","Level","Message"])
     return ws_data, ws_log
 
-def _att_sheets_append_rows(snapshot: dict, rows: list[dict]) -> bool:
+def _att_sheets_append_rows(snapshot: dict, rows: list[dict], note: str = "") -> bool:
     out = _gs_open_or_none()
     if not out:
         return False
@@ -315,11 +315,24 @@ def _att_sheets_append_rows(snapshot: dict, rows: list[dict]) -> bool:
             r["display_name"],
             r["status"],
             snapshot.get("snapshot_time") or "",
-            "",  # Note
+            note,  # <- hier landet INTERIM / FINAL
         ])
     if to_append:
         ws_data.append_rows(to_append, value_input_option="RAW")
     return True
+
+def _att_sheets_append_raw(rows2d: list[list[str]]) -> bool:
+    """
+    rows2d: 2D-Liste im Format:
+      [Date, SlotTime, User ID, Discord Name, Status, Snapshot Time, Note]
+    """
+    out = _gs_open_or_none()
+    if not out or not rows2d:
+        return False
+    ws_data, _ = out
+    ws_data.append_rows(rows2d, value_input_option="RAW")
+    return True
+
 
 def _att_sheets_log(guild: discord.Guild, channel: discord.abc.GuildChannel, message_id: int, level: str, text: str):
     out = _gs_open_or_none()
@@ -2851,17 +2864,16 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
 
 
 
-async def _att_scan_channel(guild: discord.Guild, channel: discord.TextChannel, *, silent: bool = True):
-    """
-    Scannt den Channel:
-      - identifiziert Anker (Date-only Messages)
-      - mappt Replies (Games) auf ihren Anker
-      - aktualisiert Zwischenstände (C/R/X; NR interim)
-      - finalisiert fällige Sessions (append-only + optional Sheets)
-    Gibt (warnings, finalized_count) zurück.
-    """
+async def _att_scan_channel(
+    guild: discord.Guild,
+    channel: discord.TextChannel,
+    *,
+    silent: bool = True,
+    collect_live_rows: bool = False
+):
     warnings: list[str] = []
     finalized_count = 0
+    live_rows: list[list[str]] = []
 
     # 1) Anker finden
     anchors: dict[int, str] = {}  # anchor_msg_id -> 'YYYY-MM-DD'
@@ -2967,6 +2979,38 @@ async def _att_scan_channel(guild: discord.Guild, channel: discord.TextChannel, 
         union_CRX = present["C"] | present["R"] | present["X"]
         nr_now = {uid for uid in roster if uid not in union_CRX}
 
+                # ---- Live-Zeilen bauen (optional, nur wenn gewünscht & nicht gefroren) ----
+        if collect_live_rows and not ses.get("frozen"):
+            for uid in sorted(roster):
+                is_x = uid in present["X"]
+                c    = uid in present["C"]
+                r    = uid in present["R"]
+
+                if is_x:
+                    status = "X"
+                else:
+                    if c and r:
+                        status = "C+R"
+                    elif c:
+                        status = "C"
+                    elif r:
+                        status = "R"
+                    else:
+                        status = "NR"
+
+                mem = guild.get_member(uid)
+                dname = mem.display_name if mem else f"User {uid}"
+
+                live_rows.append([
+                    anchor_ymd,                 # Date
+                    ses["slot_time"] or "",     # SlotTime (ISO oder leer)
+                    str(uid),                   # User ID
+                    dname,                      # Discord Name
+                    status,                     # Status (C/R/C+R/X/NR)
+                    now_utc.isoformat(),        # Snapshot Time (UTC)
+                    "INTERIM",                  # Note
+                ])
+
         ses["interim"] = {
             "C": sorted(present["C"]),
             "R": sorted(present["R"]),
@@ -3041,7 +3085,7 @@ async def _att_scan_channel(guild: discord.Guild, channel: discord.TextChannel, 
                     warnings.append(f"Sheets-Export fehlgeschlagen für Game {gm.id}.")
 
     _attendance_save_store()
-    return (warnings, finalized_count)
+    return (warnings, finalized_count, live_rows)
 
 @bot.command(name="ATblacklist")
 @has_any_role(STAFF_ROLES)
