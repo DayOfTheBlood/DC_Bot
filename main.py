@@ -388,6 +388,7 @@ def _att_sheets_upsert_block(
       - existierende User im Block werden aktualisiert
       - neue User werden am Blockende hinzugefügt
       - keine Duplikate
+      - User-Zeilen farbig nach Status
     """
     import re
 
@@ -400,6 +401,7 @@ def _att_sheets_upsert_block(
     DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     TIME_RX = re.compile(r"^\d{2}:\d{2}$")
 
+    # ---------- Format-Helper ----------
     def _format_header(row: int, is_final: bool):
         color = {"red": 0.9, "green": 0.2, "blue": 0.2} if is_final else {"red": 0.0, "green": 0.8, "blue": 0.0}
         try:
@@ -420,15 +422,32 @@ def _att_sheets_upsert_block(
             except Exception:
                 pass
 
-    # -------- 0) Eingangs-List deduplizieren (falls doppelt geliefert) --------
+    def _format_row_by_status(row: int, status: str | None):
+        s = (status or "").upper()
+        if s in ("C", "R", "C+R"):
+            col = {"red": 1.0, "green": 0.95, "blue": 0.60}   # gelb
+        elif s == "X":
+            col = {"red": 1.0, "green": 0.80, "blue": 0.40}   # orange
+        elif s == "NR":
+            col = {"red": 0.95, "green": 0.65, "blue": 0.25}  # dunkles orange
+        else:
+            col = {"red": 1, "green": 1, "blue": 1}           # fallback weiß
+        try:
+            ws_data.format(f"A{row}:E{row}", {
+                "backgroundColor": col,
+                "textFormat": {"bold": False}
+            })
+        except Exception:
+            pass
+
+    # ---------- 0) Eingabe deduplizieren ----------
     dedup: dict[int, tuple[str, int, str]] = {}
     for dn, uid, st in user_rows:
         dedup[int(uid)] = (dn, int(uid), st)
     new_users = list(dedup.values())
-    # Optional sort: Name case-insensitive
     new_users.sort(key=lambda x: x[0].casefold())
 
-    # -------- 1) Header (genau dieses Datum + Uhrzeit) finden/erstellen --------
+    # ---------- 1) Header finden/erstellen ----------
     colA = ws_data.col_values(1)  # Datum
     colB = ws_data.col_values(2)  # Uhrzeit
     nrows = max(len(colA), len(colB))
@@ -442,16 +461,14 @@ def _att_sheets_upsert_block(
             break
 
     if header_row is None:
-        # Header (ohne Format) an Start_ROW einfügen
         ws_data.insert_row(["", "", "", ""], index=START_ROW)
         header_row = START_ROW
         ws_data.update(f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
     else:
-        # sicherstellen, dass B (Uhrzeit) korrekt ist
         if (ws_data.cell(header_row, 2).value or "") != (slot_time_label or ""):
-            ws_data.update_cell(header_row, 2, slot_time_label or "")
+            ws_data.update_cell(header_row, 2, (slot_time_label or ""))
 
-    # -------- 2) Block-Grenzen bestimmen (bis vor den nächsten Header) --------
+    # ---------- 2) Block-Grenzen bestimmen ----------
     colA = ws_data.col_values(1)
     colB = ws_data.col_values(2)
     nrows = max(len(colA), len(colB))
@@ -462,16 +479,15 @@ def _att_sheets_upsert_block(
         a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
         b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
         if DATE_RX.match(a) and TIME_RX.match(b):
-            break  # nächster Game-Header beginnt hier
-        # Leere komplett am Blattende ignorieren (wir zählen nur „belegte“)
+            break  # nächster Header
+        # belegte Zeile?
         if a or b or any((ws_data.cell(i, c).value or "").strip() for c in (3, 4, 5)):
             block_end = i
 
-    # -------- 3) Bestehende User im Block einlesen (ID -> Zeile) --------
+    # ---------- 3) Vorhandene User im Block (ID->Zeile) ----------
     existing_by_id: dict[int, int] = {}
     if block_end >= block_start:
-        # Spalte B (User-ID) dieses Blocks auslesen
-        existing_ids = ws_data.get(f"B{block_start}:B{block_end}")  # Liste von Einzellisten oder leeren
+        existing_ids = ws_data.get(f"B{block_start}:B{block_end}")  # Liste von [value]
         for idx, cell in enumerate(existing_ids or [], start=block_start):
             try:
                 raw = (cell[0] if isinstance(cell, list) and cell else "").strip()
@@ -481,34 +497,39 @@ def _att_sheets_upsert_block(
             except Exception:
                 continue
 
-    # -------- 4) Updates für vorhandene + Liste für neue vorbereiten --------
+    # ---------- 4) Updates & Adds vorbereiten ----------
     updates: list[tuple[int, list[str]]] = []  # (row_idx, [name, id, status])
-    adds: list[list[str]] = []                # [[name, id, status, ""] ...]
+    adds: list[list[str]] = []                # [[name, id, status, ""]]
 
     for dn, uid, st in new_users:
         row_idx = existing_by_id.get(uid)
         if row_idx:
             updates.append((row_idx, [dn, str(uid), st]))
         else:
-            adds.append([dn, str(uid), st, ""])  # Note leer
+            adds.append([dn, str(uid), st, ""])
 
-    # -------- 5) Neue User am Blockende einfügen --------
+    # ---------- 5) Neue User am Blockende einfügen ----------
     if adds:
         insert_at = (block_end + 1) if block_end >= block_start else block_start
         ws_data.insert_rows([["", "", "", ""] for _ in range(len(adds))], row=insert_at)
         ws_data.update(f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
-        # frisch eingefügte Zeilen entformatieren (weiß, nicht fett)
+        # zuerst neutral entformatieren …
         _format_users_plain(insert_at, insert_at + len(adds) - 1)
-        block_end = insert_at + len(adds) - 1  # neuen Block-Ende merken
+        # … dann je Zeile nach Status einfärben
+        for offset, row_vals in enumerate(adds):
+            st = row_vals[2]
+            _format_row_by_status(insert_at + offset, st)
+        block_end = insert_at + len(adds) - 1
 
-    # -------- 6) Vorhandene User aktualisieren --------
+    # ---------- 6) Bestehende User aktualisieren + einfärben ----------
     for row_idx, vals in updates:
         try:
             ws_data.update(f"A{row_idx}:C{row_idx}", [vals], value_input_option="RAW")
         except Exception:
             pass
+        _format_row_by_status(row_idx, vals[2])
 
-    # -------- 7) Header zuletzt formatieren (damit darunter nichts Grün erbt) --------
+    # ---------- 7) Header zuletzt formatieren ----------
     _format_header(header_row, bool(finalized))
 
 def _att_sheets_mark_finalized(session_key: str):
