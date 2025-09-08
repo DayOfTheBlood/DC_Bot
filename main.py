@@ -162,6 +162,29 @@ attendance_store = {
 def _att_key(guild_id: int, message_id: int) -> str:
     return f"{guild_id}:{message_id}"
 
+def _att_backfill_sheets() -> int:
+    """Exportiert alle finalisierten Sessions, die noch kein 'exported'=True haben."""
+    count = 0
+    finals = attendance_store.get("finalized", {})
+    for key, entry in list(finals.items()):
+        if entry.get("exported"):
+            continue
+        snapshot = entry.get("snapshot") or {}
+        rows = entry.get("rows") or []
+        if not rows:
+            continue
+        try:
+            ok = _att_sheets_append_rows(snapshot, rows)
+            if ok:
+                entry["exported"] = True
+                count += 1
+        except Exception:
+            # still skip; optional: log ins Sheet via _att_sheets_log
+            pass
+    if count:
+        _attendance_save_store()
+    return count
+
 def _attendance_load_store():
     global attendance_store
     try:
@@ -278,10 +301,10 @@ def _gs_open_or_none():
         ws_log.append_row(["When","Guild","Channel","MessageID","Level","Message"])
     return ws_data, ws_log
 
-def _att_sheets_append_rows(snapshot: dict, rows: list[dict]):
+def _att_sheets_append_rows(snapshot: dict, rows: list[dict]) -> bool:
     out = _gs_open_or_none()
     if not out:
-        return
+        return False
     ws_data, _ = out
     to_append = []
     for r in rows:
@@ -292,10 +315,11 @@ def _att_sheets_append_rows(snapshot: dict, rows: list[dict]):
             r["display_name"],
             r["status"],
             snapshot.get("snapshot_time") or "",
-            "",  # Note (frei editierbar)
+            "",  # Note
         ])
     if to_append:
         ws_data.append_rows(to_append, value_input_option="RAW")
+    return True
 
 def _att_sheets_log(guild: discord.Guild, channel: discord.abc.GuildChannel, message_id: int, level: str, text: str):
     out = _gs_open_or_none()
@@ -2995,6 +3019,16 @@ async def _att_scan_channel(guild: discord.Guild, channel: discord.TextChannel, 
                 "snapshot": snapshot,
                 "rows": rows,
             }
+            # Optional: Sheets-Append + Export-Flag
+            exported = False
+            try:
+                exported = _att_sheets_append_rows(snapshot, rows)
+            except Exception:
+                exported = False
+                if not silent:
+                    warnings.append(f"Sheets-Export fehlgeschlagen für Game {gm.id}.")
+            
+            attendance_store["finalized"][key]["exported"] = bool(exported)
             ses["frozen"] = True
             finalized_count += 1
 
@@ -3092,6 +3126,12 @@ async def at_update(ctx: commands.Context):
         # Optionale Sheet-Logs der Warnungen
         for w in warnings[:20]:  # nicht spammen
             _att_sheets_log(ctx.guild, ch, 0, "WARN", w)
+
+    backfilled = _att_backfill_sheets()
+    summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
+    if backfilled:
+        summary += f", {backfilled} exportiert (Backfill)"
+    summary += "."
 
     summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert."
     if all_warnings:
