@@ -370,54 +370,134 @@ def _sheet_read_block(ws, start: int, height: int) -> tuple[dict[str, str], list
             order.append(uid)
     return id_to_note, order
 
-def _att_sheets_upsert_block(session_key: str, date_label: str,
-                             user_rows: list[tuple[str, int, str]],
-                             finalized: bool) -> bool:
-    ws = _ws_data_or_none()
-    if not ws:
-        return False
+def _att_sheets_upsert_block(
+    session_key: str,
+    date_label: str,             # 'YYYY-MM-DD'
+    slot_time_label: str,        # 'HH:MM' (CET) oder ''
+    user_rows: list[tuple[str, int, str]],  # [(display_name, user_id, status)]
+    finalized: bool
+) -> None:
+    """
+    Schreibt/aktualisiert einen Tages-Block:
+      Header (A=Datum, B=Uhrzeitliste), darunter User-Zeilen (A=Name, B=ID, C=Status, D=Note leer).
+      - Header wird nur bei Neuerstellung grün gefärbt.
+      - Bei finalized=True wird Header rot gefärbt.
+      - Mehrere Games an einem Tag -> Spalte B enthält 'HH:MM, HH:MM, ...'.
+      - Der gesamte User-Block unter dem Header wird ersetzt (upsert), ohne andere Tage zu berühren.
+    """
+    import re
 
-    blocks = attendance_store.setdefault("sheet_blocks", {})
-    block = blocks.get(session_key)
-    needed_height = 1 + len(user_rows)  # 1 = Header
+    out = _gs_open_or_none()
+    if not out:
+        return
+    ws_data, _ = out
 
-    if block is None:
-        # neuen Block ganz oben (ab GSHEETS_START_ROW) einfügen
-        ws.insert_rows([[""] * SHEET_NUM_COLS] * needed_height, row=GSHEETS_START_ROW)
-        _sheet_shift_indices(GSHEETS_START_ROW, needed_height)
-        start = GSHEETS_START_ROW
-        block = {"start": start, "height": needed_height, "finalized": bool(finalized)}
-        blocks[session_key] = block
+    START_ROW = 10
+    DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    # --- 1) Header-Zeile suchen oder neu einfügen ---
+    colA = ws_data.col_values(1)  # Spalte A komplett (ohne garantierte Leerzeilen am Ende)
+    header_row = None
+    for idx, val in enumerate(colA, start=1):
+        if idx < START_ROW:
+            continue
+        if str(val).strip() == date_label:
+            header_row = idx
+            break
+
+    created_new_header = False
+    if header_row is None:
+        # neuen Header direkt ab START_ROW einfügen, ältere Blöcke nach unten schieben
+        insert_at = START_ROW
+        # gspread: eine einzelne Zeile einfügen
+        ws_data.insert_row(["", "", "", ""], index=insert_at)
+        header_row = insert_at
+        created_new_header = True
+
+        # Datum + Zeit (falls vorhanden) setzen
+        ws_data.update_cell(header_row, 1, date_label)
+        ws_data.update_cell(header_row, 2, slot_time_label or "")
+
+        # Nur bei NEU grün färben
+        try:
+            ws_data.format(f"A{header_row}:E{header_row}", {
+                "backgroundColor": {"red": 0.0, "green": 0.8, "blue": 0.0},
+                "textFormat": {"bold": True}
+            })
+        except Exception:
+            pass
     else:
-        start = int(block["start"])
-        current_h = int(block.get("height", 1))
-        if needed_height > current_h:
-            add = needed_height - current_h
-            ws.insert_rows([[""] * SHEET_NUM_COLS] * add, row=start + 1)
-            _sheet_shift_indices(start + 1, add)
-            block["height"] = current_h + add
+        # bestehenden Header gefunden -> Uhrzeitliste in Spalte B vereinigen
+        try:
+            current_times = (ws_data.cell(header_row, 2).value or "").strip()
+            times_set = set()
+            if current_times:
+                times_set |= {t.strip() for t in current_times.split(",") if t.strip()}
+            if slot_time_label:
+                times_set.add(slot_time_label.strip())
+            new_times = ", ".join(sorted(times_set)) if times_set else ""
+            if new_times != current_times:
+                ws_data.update_cell(header_row, 2, new_times)
+        except Exception:
+            pass
 
-    # existierende Notes per User-ID konservieren
-    id_to_note, _order = _sheet_read_block(ws, block["start"], block["height"])
+    # --- 2) Bestehenden User-Block unter dem Header entfernen (bis zum nächsten Datum) ---
+    # Wir lesen Spalte A erneut und suchen den Beginn des nächsten Datum-Headers.
+    colA = ws_data.col_values(1)
+    last_index_in_colA = len(colA)
 
-    # --- Header schreiben + einfärben ---
-    slot_label = _att_slot_label_for_date(date_label)  # <— HIER richtig
-    ws.update(f"A{block['start']}:D{block['start']}", [[date_label, slot_label, "", ""]])
-    _sheet_format_header(ws, block["start"], finalized)
+    # Bereich des aktuellen Blocks:
+    block_start = header_row + 1
+    block_end = block_start - 1  # wird gleich erhöht
 
-    # Body schreiben
-    body = []
-    for name, uid, status in user_rows:
-        note = id_to_note.get(str(uid), "")
-        body.append([name, str(uid), status, note])
+    # Wir laufen ab block_start nach unten, solange:
+    # - in Spalte A KEIN neues Datum steht
+    # (User-Zeilen haben in Spalte A Namen, das ist ok; wir stoppen nur bei echtem Datumsmuster)
+    for idx in range(block_start, last_index_in_colA + 1):
+        val = str(colA[idx - 1]).strip() if idx - 1 < len(colA) else ""
+        if DATE_RX.match(val):
+            break  # nächster Tages-Header beginnt hier -> unseren Block bis idx-1
+        # sonst gehört Zeile noch zum aktuellen Block (auch wenn A leer ist)
+        block_end = idx
 
-    if body:
-        ws.update(f"A{block['start']+1}:D{block['start']+len(body)}", body, value_input_option="RAW")
+    # vorhandene Userzeilen löschen (falls es welche gibt)
+    if block_end >= block_start:
+        try:
+            ws_data.delete_rows(block_start, block_end - block_start + 1)
+        except Exception:
+            # bei Problemen lieber still weitermachen; wir fügen gleich frisch ein
+            pass
 
-    block["finalized"] = bool(finalized)
-    block["height"] = 1 + len(body)
-    _attendance_save_store()
-    return True
+    # --- 3) Neue User-Zeilen einfügen und befüllen ---
+    n = len(user_rows)
+    if n > 0:
+        # n leere Zeilen direkt unter dem Header einfügen
+        ws_data.insert_rows([["", "", "", ""] for _ in range(n)], row=header_row + 1)
+
+        values = []
+        for display_name, uid, status in user_rows:
+            values.append([display_name, str(uid), status, ""])  # Note-Spalte leer
+        # A..D setzen
+        ws_data.update(
+            f"A{header_row+1}:D{header_row+n}",
+            values,
+            value_input_option="RAW"
+        )
+
+    # --- 4) Header-Farbe final setzen ---
+    try:
+        if finalized:
+            # Finale -> ROT, nie wieder grün überschreiben
+            ws_data.format(f"A{header_row}:E{header_row}", {
+                "backgroundColor": {"red": 0.9, "green": 0.2, "blue": 0.2},
+                "textFormat": {"bold": True}
+            })
+        else:
+            # Nicht-final: grün nur, wenn wir den Header gerade NEU angelegt haben (oben bereits gesetzt).
+            # Existierende grüne/rote Header werden hier absichtlich NICHT überschrieben.
+            pass
+    except Exception:
+        pass
 
 def _att_sheets_mark_finalized(session_key: str):
     ws = _ws_data_or_none()
@@ -3181,24 +3261,63 @@ async def _att_scan_channel(
             "NR": sorted(nr_now),
         }
         ses["last_scanned_at"] = datetime.now(timezone.utc).isoformat()
-        # --- Live-Block für dieses Game im Sheet (Header GRÜN) ---
-        try:
-            live_rows = []
-            for uid in sorted(roster):
-                mem = guild.get_member(uid)
-                name = mem.display_name if mem else f"User {uid}"
-                is_x = uid in present["X"]
-                c = uid in present["C"]
-                r = uid in present["R"]
-                if is_x:
-                    status = "X"
-                else:
-                    status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
-                live_rows.append((name, uid, status))
-            _att_sheets_upsert_block(key, anchor_ymd, live_rows, finalized=False)
-        except Exception as e:
-            if not silent:
-                warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
+
+        # ❗ Finalisierte Sessions NICHT mehr live ins Sheet schreiben,
+        # sonst würden wir rote Header wieder grün färben.
+        if not ses.get("frozen"):
+            try:
+                # Zeit-Label (CET) für Spalte B
+                slot_label = ""
+                if slot_dt:
+                    slot_label = slot_dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
+        
+                # Live-Zeilen bauen (Interim): Name, ID, Status (X > C+R > C > R > NR)
+                live_rows = []
+                for uid in sorted(_roster_now(guild, roles_map, blacklist)):
+                    is_x = uid in present["X"]
+                    c = uid in present["C"]
+                    r = uid in present["R"]
+                    if is_x:
+                        st = "X"
+                    else:
+                        if c and r: st = "C+R"
+                        elif c:     st = "C"
+                        elif r:     st = "R"
+                        else:       st = "NR"
+                    mem = guild.get_member(uid)
+                    dname = mem.display_name if mem else f"User {uid}"
+                    live_rows.append((dname, uid, st))
+        
+                # Live upsert (grün) – aber nur solange NICHT final
+                _att_sheets_upsert_block(
+                    session_key=key,
+                    date_label=anchor_ymd,
+                    slot_time_label=slot_label,
+                    user_rows=live_rows,
+                    finalized=False
+                )
+            except Exception as e:
+                if not silent:
+                    warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
+        
+                # --- Live-Block für dieses Game im Sheet (Header GRÜN) ---
+                try:
+                    live_rows = []
+                    for uid in sorted(roster):
+                        mem = guild.get_member(uid)
+                        name = mem.display_name if mem else f"User {uid}"
+                        is_x = uid in present["X"]
+                        c = uid in present["C"]
+                        r = uid in present["R"]
+                        if is_x:
+                            status = "X"
+                        else:
+                            status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
+                        live_rows.append((name, uid, status))
+                    _att_sheets_upsert_block(key, anchor_ymd, live_rows, finalized=False)
+                except Exception as e:
+                    if not silent:
+                        warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
 
 
         # 5) Finalisieren wenn fällig und noch nicht frozen
@@ -3257,6 +3376,20 @@ async def _att_scan_channel(
             attendance_store["finalized"][key]["exported"] = bool(exported)
             ses["frozen"] = True
             finalized_count += 1
+
+            # Header/Block im Sheet jetzt als FINAL neu färben/setzen (ROT):
+            try:
+                user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
+                _att_sheets_upsert_block(
+                    session_key=key,
+                    date_label=anchor_ymd,
+                    slot_time_label=(slot_dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M") if slot_dt else ""),
+                    user_rows=user_rows_simple,
+                    finalized=True  # -> ROT
+                )
+            except Exception as e:
+                if not silent:
+                    warnings.append(f"Sheet (final) recolor failed for Game {gm.id}: {e}")
 
             try:
                 # simple rows aus 'rows' bauen: (Name, ID, Status)
