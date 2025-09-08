@@ -425,11 +425,11 @@ def _att_sheets_upsert_block(
     def _format_row_by_status(row: int, status: str | None):
         s = (status or "").upper()
         if s in ("C", "R", "C+R"):
-            col = {"red": 1.0, "green": 0.95, "blue": 0.60}   # gelb
+            col = {"red": 1.0, "green": 1.0, "blue": 0.05}   # gelb
         elif s == "X":
-            col = {"red": 1.0, "green": 0.80, "blue": 0.40}   # orange
+            col = {"red": 1.0, "green": 0.60, "blue": 0.05}   # orange
         elif s == "NR":
-            col = {"red": 0.95, "green": 0.65, "blue": 0.25}  # dunkles orange
+            col = {"red": 0.4, "green": 0.01, "blue": 0.01}  # dunkles rot
         else:
             col = {"red": 1, "green": 1, "blue": 1}           # fallback weiß
         try:
