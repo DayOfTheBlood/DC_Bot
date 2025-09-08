@@ -126,6 +126,8 @@ ATTENDANCE_EMOJI_IDS = {
 }
 ATTENDANCE_ROLE_IDS = {"Caster": None, "Referee": None}
 ATTENDANCE_ROLE_NAMES = {"Caster", "Referee"}
+GSHEETS_START_ROW = 10          # ab hier nach oben einfügen
+SHEET_NUM_COLS = 4              # A:D  (Name, ID, Status, Note)
 
 if ZoneInfo is not None:
     ATTENDANCE_TZ = ZoneInfo("Europe/Berlin")
@@ -154,9 +156,10 @@ KILLER_FORUM_OVERRIDES: dict[str, int] = {
 running_timers = {}
 
 attendance_store = {
-    "sessions": {},   # { "<guild_id>:<message_id>": {meta...} }
-    "finalized": {},  # { "<guild_id>:<message_id>": { snapshot, rows } }
-    "blacklist": {},  # { "<guild_id>": [user_id, ...] }
+    "sessions": {},       # { "<guild_id>:<message_id>": {meta...} }
+    "finalized": {},      # { "<guild_id>:<message_id>": { snapshot, rows } }
+    "blacklist": {},      # { "<guild_id>": [user_id, ...] }
+    "sheet_blocks": {},   # { "<guild>:<message>": {"start": int, "height": int, "finalized": bool} }
 }
 
 def _att_key(guild_id: int, message_id: int) -> str:
@@ -186,6 +189,7 @@ def _att_backfill_sheets() -> int:
     return count
 
 def _attendance_load_store():
+    attendance_store.setdefault("sheet_blocks", {})
     global attendance_store
     try:
         if ATTENDANCE_STORE_FILE.exists():
@@ -300,6 +304,122 @@ def _gs_open_or_none():
         ws_log = sh.add_worksheet(title=GSHEETS_LOG_TITLE, rows=1000, cols=6)
         ws_log.append_row(["When","Guild","Channel","MessageID","Level","Message"])
     return ws_data, ws_log
+
+def _ws_data_or_none():
+    out = _gs_open_or_none()
+    if not out:
+        return None
+    ws_data, _ = out
+    return ws_data
+
+def _sheet_format_header(ws, row: int, finalized: bool):
+    # grün (interim) / rot (final) + fett
+    color = {"red": 0.2, "green": 0.9, "blue": 0.2} if not finalized else {"red": 0.9, "green": 0.2, "blue": 0.2}
+    ws.format(f"A{row}:D{row}", {
+        "backgroundColor": color,
+        "textFormat": {"bold": True}
+    })
+
+def _sheet_shift_indices(from_row: int, delta: int):
+    """Wenn über bestehenden Blöcken Zeilen eingefügt werden, verschieben wir deren Startzeilen im Store."""
+    blocks = attendance_store.setdefault("sheet_blocks", {})
+    for info in blocks.values():
+        try:
+            if int(info.get("start", 10)) >= from_row:
+                info["start"] = int(info["start"]) + delta
+        except Exception:
+            pass
+
+def _sheet_read_block(ws, start: int, height: int) -> tuple[dict[str, str], list[str]]:
+    """
+    liest A..D des Blocks und liefert:
+      - id->note Mapping (User-ID -> Note)
+      - bestehende User-ID-Reihenfolge (Liste von Strings)
+    """
+    id_to_note = {}
+    order = []
+    if height <= 1:
+        return id_to_note, order
+    try:
+        values = ws.get(f"A{start}:D{start + height - 1}")
+    except Exception:
+        return id_to_note, order
+    # Zeile 0 = Header
+    for row in values[1:]:
+        uid = (row[1] if len(row) > 1 else "").strip()
+        note = (row[3] if len(row) > 3 else "").strip()
+        if uid:
+            id_to_note[uid] = note
+            order.append(uid)
+    return id_to_note, order
+
+def _att_sheets_upsert_block(session_key: str, date_label: str,
+                             user_rows: list[tuple[str, int, str]],
+                             finalized: bool) -> bool:
+    """
+    Upsert eines Game-Blocks:
+      session_key: "<guild_id>:<message_id>"
+      date_label:  "YYYY-MM-DD" (nur im Header in A)
+      user_rows:   [(display_name, user_id, status), ...]
+      finalized:   True => Header rot, sonst grün
+    """
+    ws = _ws_data_or_none()
+    if not ws:
+        return False
+
+    blocks = attendance_store.setdefault("sheet_blocks", {})
+    block = blocks.get(session_key)
+    needed_height = 1 + len(user_rows)  # 1 = Header
+
+    if block is None:
+        # neuen Block ganz oben (ab GSHEETS_START_ROW) einfügen
+        ws.insert_rows(GSHEETS_START_ROW, number=needed_height)
+        _sheet_shift_indices(GSHEETS_START_ROW, needed_height)
+        start = GSHEETS_START_ROW
+        block = {"start": start, "height": needed_height, "finalized": bool(finalized)}
+        blocks[session_key] = block
+    else:
+        start = int(block["start"])
+        current_h = int(block.get("height", 1))
+        if needed_height > current_h:
+            add = needed_height - current_h
+            # unter dem Header nachschieben
+            ws.insert_rows(start + 1, number=add)
+            _sheet_shift_indices(start + 1, add)
+            block["height"] = current_h + add
+
+    # existierende Notes per User-ID konservieren
+    id_to_note, _order = _sheet_read_block(ws, block["start"], block["height"])
+
+    # Header schreiben + einfärben
+    ws.update(f"A{block['start']}:D{block['start']}", [[date_label, "", "", ""]])
+    _sheet_format_header(ws, block["start"], finalized)
+
+    # Body schreiben (A:D), Notes per ID wieder einsetzen
+    body = []
+    for name, uid, status in user_rows:
+        note = id_to_note.get(str(uid), "")
+        body.append([name, str(uid), status, note])
+
+    if body:
+        ws.update(f"A{block['start']+1}:D{block['start']+len(body)}", body, value_input_option="RAW")
+
+    # Block-Metadaten aktualisieren
+    block["finalized"] = bool(finalized)
+    block["height"] = 1 + len(body)
+    _attendance_save_store()
+    return True
+
+def _att_sheets_mark_finalized(session_key: str):
+    ws = _ws_data_or_none()
+    if not ws:
+        return
+    blk = attendance_store.setdefault("sheet_blocks", {}).get(session_key)
+    if not blk:
+        return
+    _sheet_format_header(ws, int(blk["start"]), finalized=True)
+    blk["finalized"] = True
+    _attendance_save_store()
 
 def _att_sheets_append_rows(snapshot: dict, rows: list[dict], note: str = "") -> bool:
     out = _gs_open_or_none()
@@ -3024,6 +3144,25 @@ async def _att_scan_channel(
             "NR": sorted(nr_now),
         }
         ses["last_scanned_at"] = datetime.now(timezone.utc).isoformat()
+        # --- Live-Block für dieses Game im Sheet (Header GRÜN) ---
+        try:
+            live_rows = []
+            for uid in sorted(roster):
+                mem = guild.get_member(uid)
+                name = mem.display_name if mem else f"User {uid}"
+                is_x = uid in present["X"]
+                c = uid in present["C"]
+                r = uid in present["R"]
+                if is_x:
+                    status = "X"
+                else:
+                    status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
+                live_rows.append((name, uid, status))
+            _att_sheets_upsert_block(key, anchor_ymd, live_rows, finalized=False)
+        except Exception as e:
+            if not silent:
+                warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
+
 
         # 5) Finalisieren wenn fällig und noch nicht frozen
         already_final = attendance_store["finalized"].get(key)
@@ -3089,6 +3228,18 @@ async def _att_scan_channel(
                 # still silently continue; Warnung nur bei !ATupdate
                 if not silent:
                     warnings.append(f"Sheets-Export fehlgeschlagen für Game {gm.id}.")
+
+            # --- FINALER Sheet-Block (Header ROT) ---
+            try:
+                final_rows = []
+                for r in rows:
+                    final_rows.append((r["display_name"], r["user_id"], r["status"]))
+                _att_sheets_upsert_block(key, anchor_ymd, final_rows, finalized=True)
+                _att_sheets_mark_finalized(key)
+            except Exception as e:
+                if not silent:
+                    warnings.append(f"Sheet (final) fehlgeschlagen für Game {gm.id}: {e}")
+
 
     _attendance_save_store()
     return (warnings, finalized_count, live_rows)
@@ -3182,8 +3333,8 @@ async def at_update(ctx: commands.Context):
             _att_sheets_log(ctx.guild, ch, 0, "WARN", w)
     if all_live_rows:
         _att_sheets_append_raw(all_live_rows)
-    backfilled = _att_backfill_sheets()
-    summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
+    #backfilled = _att_backfill_sheets()
+    #summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
     if backfilled:
         summary += f", {backfilled} exportiert (Backfill)"
     summary += "."
