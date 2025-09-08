@@ -321,18 +321,18 @@ def _att_sheets_append_rows(snapshot: dict, rows: list[dict], note: str = "") ->
         ws_data.append_rows(to_append, value_input_option="RAW")
     return True
 
-def _att_sheets_append_raw(rows2d: list[list[str]]) -> bool:
+def _att_sheets_append_raw(rows: list[list[str]]) -> bool:
     """
-    rows2d: 2D-Liste im Format:
-      [Date, SlotTime, User ID, Discord Name, Status, Snapshot Time, Note]
+    Hängt rohe Zeilen (bereits im AT-Format) an die AT-Tabelle an.
+    Erwartete Reihenfolge je Zeile:
+    [Date, SlotTime, User ID, Discord Name, Status, Snapshot Time, Note]
     """
     out = _gs_open_or_none()
-    if not out or not rows2d:
+    if not out or not rows:
         return False
     ws_data, _ = out
-    ws_data.append_rows(rows2d, value_input_option="RAW")
+    ws_data.append_rows(rows, value_input_option="RAW")
     return True
-
 
 def _att_sheets_log(guild: discord.Guild, channel: discord.abc.GuildChannel, message_id: int, level: str, text: str):
     out = _gs_open_or_none()
@@ -1041,6 +1041,12 @@ async def on_ready():
 
     print(f"Bot is online: {bot.user}")
     await bot.change_presence(activity=discord.Game(name="made by Fluffy"))
+    # Attendance-Store laden + Autoscan starten
+    _attendance_load_store()
+    if not getattr(bot, "_attendance_autoscan_started", False):
+        asyncio.create_task(_attendance_autoscan_loop())
+        bot._attendance_autoscan_started = True
+
 
 @bot.event
 async def on_disconnect():
@@ -3149,9 +3155,13 @@ async def at_update(ctx: commands.Context):
     total_games = 0
     total_final = 0
     all_warnings = []
+    all_live_rows: list[list[str]] = []
 
     for ch in channels:
-        warnings, finalized = await _att_scan_channel(ctx.guild, ch, silent=False)
+        warnings, finalized, live_rows = await _att_scan_channel(
+            ctx.guild, ch, silent=False, collect_live_rows=True
+        )
+        all_live_rows.extend(live_rows)
         total_final += finalized
         all_warnings.extend([f"#{ch.name}: {w}" for w in warnings])
 
@@ -3170,7 +3180,8 @@ async def at_update(ctx: commands.Context):
         # Optionale Sheet-Logs der Warnungen
         for w in warnings[:20]:  # nicht spammen
             _att_sheets_log(ctx.guild, ch, 0, "WARN", w)
-
+    if all_live_rows:
+        _att_sheets_append_raw(all_live_rows)
     backfilled = _att_backfill_sheets()
     summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
     if backfilled:
@@ -3191,27 +3202,38 @@ async def _attendance_autoscan_loop():
     while not bot.is_closed():
         try:
             for g in bot.guilds:
-                channels = []
+                all_live_rows: list[list[str]] = []
+
+                # Channels einsammeln
+                channels: list[discord.TextChannel] = []
                 for cid in ATTENDANCE_CHANNEL_IDS:
                     ch = g.get_channel(cid) or await g.fetch_channel(cid)
                     if isinstance(ch, discord.TextChannel):
                         channels.append(ch)
+
+                # Scannen + Live-Zeilen sammeln
                 for ch in channels:
-                    await _att_scan_channel(g, ch, silent=True)
+                    _, _, live_rows = await _att_scan_channel(
+                        g, ch, silent=True, collect_live_rows=True
+                    )
+                    all_live_rows.extend(live_rows)
+
+                # Live-Zeilen in die AT-Tabelle schreiben
+                if all_live_rows:
+                    try:
+                        _att_sheets_append_raw(all_live_rows)
+                    except Exception:
+                        pass
+
         except Exception as e:
-            # keine Bot-Messages; optional ins Sheet loggen
+            # optional ins LOGS-Sheet schreiben
             try:
                 _att_sheets_log(g, ch, 0, "ERROR", f"autoscan: {e}")
             except Exception:
                 pass
+
         await asyncio.sleep(3600)  # stündlich
 
-# In on_ready() ergänzen (am ENDE der Funktion, nach deinen anderen Tasks):
-# ADD (einmalig starten, Flag wie bei deinen anderen Loops):
-    _attendance_load_store()
-    if not getattr(bot, "_attendance_autoscan_started", False):
-        asyncio.create_task(_attendance_autoscan_loop())
-        bot._attendance_autoscan_started = True
 
 
 
