@@ -1203,7 +1203,7 @@ async def on_ready():
     if not getattr(bot, "_attendance_autoscan_started", False):
         asyncio.create_task(_attendance_autoscan_loop())
         bot._attendance_autoscan_started = True
-
+    await _attendance_startup_catchup_once()
 
 @bot.event
 async def on_disconnect():
@@ -3504,6 +3504,187 @@ async def _attendance_autoscan_loop():
         # --- 3) schlafen bis zum nächsten Durchlauf ---
         await asyncio.sleep(3600)
 
+async def _attendance_startup_catchup_once():
+    """
+    Einmaliger Catch-up beim Bot-Start:
+      - scannt alle konfigurierten Attendance-Channels (silent=True)
+      - finalisiert Sessions, deren finalize_at in der Vergangenheit liegt
+      - upsertet/aktualisiert die Blöcke im Google Sheet (Datum+Zeit(en) Kopf, Zeilen: Name | ID | Status | Note)
+      - backfillt finalisierte Sessions, die noch nicht exportiert wurden
+    """
+    await bot.wait_until_ready()
+
+    for guild in bot.guilds:
+        # 1) Channels sammeln
+        channels: list[discord.TextChannel] = []
+        for cid in ATTENDANCE_CHANNEL_IDS:
+            try:
+                ch = guild.get_channel(cid) or await guild.fetch_channel(cid)
+                if isinstance(ch, discord.TextChannel):
+                    channels.append(ch)
+            except Exception:
+                pass
+
+        # 2) Channel-Scan (liest Reaktionen, setzt interim/finalized)
+        for ch in channels:
+            try:
+                await _att_scan_channel(guild, ch, silent=True)
+            except Exception as e:
+                try:
+                    _att_sheets_log(guild, ch, 0, "ERROR", f"startup scan: {e}")
+                except Exception:
+                    pass
+
+        # 3) Fallback: Aus Store überfällige Sessions finalisieren (falls Messages z.B. gelöscht/älter sind)
+        try:
+            now_utc = datetime.now(timezone.utc)
+            channel_ids = {c.id for c in channels}
+            sessions = attendance_store.get("sessions", {})
+            finals   = attendance_store.get("finalized", {})
+
+            for skey, ses in list(sessions.items()):
+                if ses.get("guild_id") != guild.id or ses.get("channel_id") not in channel_ids:
+                    continue
+                if ses.get("frozen") or skey in finals:
+                    continue
+
+                fin_iso = ses.get("finalize_at")
+                if not fin_iso:
+                    continue
+                try:
+                    fin_dt = datetime.fromisoformat(fin_iso)
+                except Exception:
+                    continue
+
+                if now_utc >= fin_dt:
+                    # aus 'interim' + aktuellem Namens-Snapshot finalisieren
+                    interim = ses.get("interim", {}) or {}
+                    c_set = set(interim.get("C", []))
+                    r_set = set(interim.get("R", []))
+                    x_set = set(interim.get("X", []))
+                    # NR aus interim übernehmen (wir rechnen nicht neu)
+                    nr_set = set(interim.get("NR", []))
+                    all_uids = sorted(set().union(c_set, r_set, x_set, nr_set))
+
+                    rows = []
+                    for uid in all_uids:
+                        if uid in x_set:
+                            status = "X"
+                        else:
+                            c = uid in c_set
+                            r = uid in r_set
+                            if c and r: status = "C+R"
+                            elif c:      status = "C"
+                            elif r:      status = "R"
+                            else:        status = "NR"
+                        mem = guild.get_member(uid)
+                        dname = mem.display_name if mem else f"User {uid}"
+                        rows.append({
+                            "user_id": uid,
+                            "display_name": dname,
+                            "react_c": (uid in c_set),
+                            "react_r": (uid in r_set),
+                            "react_x": (uid in x_set),
+                            "status": status,
+                        })
+
+                    snapshot = {
+                        "date": ses.get("anchor_date"),
+                        "slot_time": ses.get("slot_time"),
+                        "snapshot_time": datetime.now(timezone.utc).isoformat(),
+                    }
+                    attendance_store.setdefault("finalized", {})[skey] = {
+                        "meta": {
+                            "guild_id": ses.get("guild_id"),
+                            "message_id": ses.get("message_id"),
+                            "channel_id": ses.get("channel_id"),
+                            "anchor_message_id": ses.get("anchor_message_id"),
+                        },
+                        "snapshot": snapshot,
+                        "rows": rows,
+                        "exported": False,
+                    }
+                    ses["frozen"] = True
+            _attendance_save_store()
+        except Exception:
+            pass
+
+        # 4) Blöcke im Sheet upserten (wie im Autoscan)
+        try:
+            channel_ids = {c.id for c in channels}
+            sessions = attendance_store.get("sessions", {})
+            finals   = attendance_store.get("finalized", {})
+
+            def _slot_dt(ses: dict) -> datetime:
+                s = ses.get("slot_time") or ""
+                try:
+                    dt = datetime.fromisoformat(s)
+                    if dt.tzinfo is None:
+                        return datetime.fromisoformat(s).replace(tzinfo=ATTENDANCE_TZ)
+                    return dt
+                except Exception:
+                    return datetime.max.replace(tzinfo=timezone.utc)
+
+            def _sort_key(item: tuple[str, dict]):
+                _, ses = item
+                return (ses.get("anchor_date") or "", _slot_dt(ses))
+
+            sess_list = [(k, s) for k, s in sessions.items()
+                         if s.get("guild_id") == guild.id and s.get("channel_id") in channel_ids]
+            sess_list.sort(key=_sort_key)
+
+            for skey, ses in sess_list:
+                try:
+                    interim = ses.get("interim", {}) or {}
+                    c_set = set(interim.get("C", []))
+                    r_set = set(interim.get("R", []))
+                    x_set = set(interim.get("X", []))
+                    nr_set = set(interim.get("NR", []))
+                    all_uids = sorted(set().union(c_set, r_set, x_set, nr_set))
+
+                    user_rows: list[tuple[str, int, str]] = []
+                    for uid in all_uids:
+                        if uid in x_set:
+                            status = "X"
+                        else:
+                            c = uid in c_set
+                            r = uid in r_set
+                            if c and r: status = "C+R"
+                            elif c:      status = "C"
+                            elif r:      status = "R"
+                            else:        status = "NR"
+                        mem = guild.get_member(uid)
+                        dname = mem.display_name if mem else f"User {uid}"
+                        user_rows.append((dname, uid, status))
+
+                    is_final = bool(ses.get("frozen")) or skey in finals
+                    date_label = ses.get("anchor_date") or ""
+                    if date_label:
+                        _att_sheets_upsert_block(
+                            session_key=skey,
+                            date_label=date_label,
+                            user_rows=user_rows,
+                            finalized=is_final
+                        )
+                except Exception as e:
+                    try:
+                        _att_sheets_log(guild, guild.text_channels[0] if guild.text_channels else None,
+                                        0, "WARN", f"startup upsert failed for {skey}: {e}")
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            try:
+                _att_sheets_log(guild, guild.text_channels[0] if guild.text_channels else None,
+                                0, "ERROR", f"startup upsert loop: {e}")
+            except Exception:
+                pass
+
+    # 5) bereits finalisierte Sessions ohne Export ins Sheet nachtragen
+    try:
+        _att_backfill_sheets()
+    except Exception:
+        pass
 
 
 
