@@ -3258,6 +3258,19 @@ async def _att_scan_channel(
             ses["frozen"] = True
             finalized_count += 1
 
+            try:
+                # simple rows aus 'rows' bauen: (Name, ID, Status)
+                user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
+                _att_sheets_upsert_block(
+                    session_key=key,                      # "<guild_id>:<message_id>"
+                    date_label=anchor_ymd,               # "YYYY-MM-DD"
+                    user_rows=user_rows_simple,          # [(name, id, status), ...]
+                    finalized=True                       # -> Kopfzeile ROT
+                )
+            except Exception as e:
+                if not silent:
+                    warnings.append(f"Sheet (final) recolor failed for Game {gm.id}: {e}")
+
             # Optional: Sheets-Append
             try:
                 _att_sheets_append_rows(snapshot, rows)
