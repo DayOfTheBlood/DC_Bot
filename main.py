@@ -128,6 +128,7 @@ ATTENDANCE_ROLE_IDS = {"Caster": None, "Referee": None}
 ATTENDANCE_ROLE_NAMES = {"Caster", "Referee"}
 GSHEETS_START_ROW = 10          # ab hier nach oben einfügen
 SHEET_NUM_COLS = 4              # A:D  (Name, ID, Status, Note)
+GSHEETS_LIVE_START_ROW = 10
 
 if ZoneInfo is not None:
     ATTENDANCE_TZ = ZoneInfo("Europe/Berlin")
@@ -389,7 +390,7 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
 
     if block is None:
         # neuen Block ganz oben (ab GSHEETS_START_ROW) einfügen
-        ws.insert_rows(GSHEETS_START_ROW, number=needed_height)
+        ws.insert_rows([[""] * SHEET_NUM_COLS] * needed_height, row=GSHEETS_START_ROW)
         _sheet_shift_indices(GSHEETS_START_ROW, needed_height)
         start = GSHEETS_START_ROW
         block = {"start": start, "height": needed_height, "finalized": bool(finalized)}
@@ -400,7 +401,7 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
         if needed_height > current_h:
             add = needed_height - current_h
             # unter dem Header nachschieben
-            ws.insert_rows(start + 1, number=add)
+            ws.insert_rows([[""] * SHEET_NUM_COLS] * add, row=start + 1)
             _sheet_shift_indices(start + 1, add)
             block["height"] = current_h + add
 
@@ -3347,8 +3348,6 @@ async def at_update(ctx: commands.Context):
         # Optionale Sheet-Logs der Warnungen
         for w in warnings[:20]:  # nicht spammen
             _att_sheets_log(ctx.guild, ch, 0, "WARN", w)
-    if all_live_rows:
-        _att_sheets_append_raw(all_live_rows)
     backfilled = _att_backfill_sheets()
     summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
     if backfilled:
@@ -3383,13 +3382,6 @@ async def _attendance_autoscan_loop():
                         g, ch, silent=True, collect_live_rows=True
                     )
                     all_live_rows.extend(live_rows)
-
-                # Live-Zeilen in die AT-Tabelle schreiben
-                if all_live_rows:
-                    try:
-                        _att_sheets_append_raw(all_live_rows)
-                    except Exception:
-                        pass
 
         except Exception as e:
             # optional ins LOGS-Sheet schreiben
