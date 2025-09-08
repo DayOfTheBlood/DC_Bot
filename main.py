@@ -189,13 +189,29 @@ def _att_backfill_sheets() -> int:
     return count
 
 def _attendance_load_store():
-    attendance_store.setdefault("sheet_blocks", {})
     global attendance_store
     try:
         if ATTENDANCE_STORE_FILE.exists():
-            attendance_store = json.loads(ATTENDANCE_STORE_FILE.read_text(encoding="utf-8"))
+            attendance_store = json.loads(
+                ATTENDANCE_STORE_FILE.read_text(encoding="utf-8")
+            )
+        else:
+            attendance_store = {
+                "sessions": {},
+                "finalized": {},
+                "blacklist": {},
+                "sheet_blocks": {},
+            }
     except Exception:
-        pass
+        # falls Laden schief geht, wenigsten eine gültige Struktur haben
+        attendance_store = {
+            "sessions": {},
+            "finalized": {},
+            "blacklist": {},
+            "sheet_blocks": {},
+        }
+    # sicherstellen, dass der neue Key vorhanden ist (auch bei alten Dateien)
+    attendance_store.setdefault("sheet_blocks", {})
 
 def _attendance_save_store():
     ATTENDANCE_STORE_FILE.write_text(json.dumps(attendance_store, ensure_ascii=False, indent=2), encoding="utf-8")
