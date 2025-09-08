@@ -378,12 +378,15 @@ def _att_sheets_upsert_block(
     finalized: bool
 ) -> None:
     """
-    Schreibt/aktualisiert einen Tages-Block:
-      Header (A=Datum, B=Uhrzeitliste), darunter User-Zeilen (A=Name, B=ID, C=Status, D=Note leer).
-      - Header wird nur bei Neuerstellung grün gefärbt.
-      - Bei finalized=True wird Header rot gefärbt.
-      - Mehrere Games an einem Tag -> Spalte B enthält 'HH:MM, HH:MM, ...'.
-      - Der gesamte User-Block unter dem Header wird ersetzt (upsert), ohne andere Tage zu berühren.
+    Je *Game* genau ein Header:
+      A: Datum (YYYY-MM-DD)
+      B: Uhrzeit (HH:MM CET)
+    Darunter User-Zeilen:
+      A: Name, B: User-ID, C: Status, D: Note (leer)
+    - Header wird NIE mit anderen Games zusammengeführt.
+    - Beim ersten Anlegen: grün (aktiv) oder rot (finalisiert).
+    - Bei Updates: wenn finalized=True -> rot färben; ansonsten Farbe lassen.
+    - Der gesamte User-Block unter dem Header wird ersetzt.
     """
     import re
 
@@ -394,110 +397,78 @@ def _att_sheets_upsert_block(
 
     START_ROW = 10
     DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    TIME_RX = re.compile(r"^\d{2}:\d{2}$")
 
-    # --- 1) Header-Zeile suchen oder neu einfügen ---
-    colA = ws_data.col_values(1)  # Spalte A komplett (ohne garantierte Leerzeilen am Ende)
+    # --- 1) Header (Datum+Zeit) suchen ---
+    colA = ws_data.col_values(1)  # Datum
+    colB = ws_data.col_values(2)  # Uhrzeit
+    nrows = max(len(colA), len(colB))
     header_row = None
-    for idx, val in enumerate(colA, start=1):
-        if idx < START_ROW:
-            continue
-        if str(val).strip() == date_label:
-            header_row = idx
+    for i in range(START_ROW, nrows + 1):
+        a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
+        b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
+        if a == date_label and b == (slot_time_label or ""):
+            header_row = i
             break
 
-    created_new_header = False
+    # --- 2) Header anlegen (immer einzelne Zeile) ---
     if header_row is None:
-        # neuen Header direkt ab START_ROW einfügen, ältere Blöcke nach unten schieben
-        insert_at = START_ROW
-        # gspread: eine einzelne Zeile einfügen
-        ws_data.insert_row(["", "", "", ""], index=insert_at)
-        header_row = insert_at
-        created_new_header = True
+        ws_data.insert_row(["", "", "", ""], index=START_ROW)
+        header_row = START_ROW
+        ws_data.update(f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
 
-        # Datum + Zeit (falls vorhanden) setzen
-        ws_data.update_cell(header_row, 1, date_label)
-        ws_data.update_cell(header_row, 2, slot_time_label or "")
-
-        # Nur bei NEU grün färben
+        # Farbe je nach Status
         try:
+            color = {"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}
             ws_data.format(f"A{header_row}:E{header_row}", {
-                "backgroundColor": {"red": 0.0, "green": 0.8, "blue": 0.0},
+                "backgroundColor": color,
                 "textFormat": {"bold": True}
             })
         except Exception:
             pass
     else:
-        # bestehenden Header gefunden -> Uhrzeitliste in Spalte B vereinigen
-        try:
-            current_times = (ws_data.cell(header_row, 2).value or "").strip()
-            times_set = set()
-            if current_times:
-                times_set |= {t.strip() for t in current_times.split(",") if t.strip()}
-            if slot_time_label:
-                times_set.add(slot_time_label.strip())
-            new_times = ", ".join(sorted(times_set)) if times_set else ""
-            if new_times != current_times:
-                ws_data.update_cell(header_row, 2, new_times)
-        except Exception:
-            pass
+        # existierender Header -> Uhrzeit korrigieren (sollte identisch sein) und ggf. auf rot setzen
+        if (ws_data.cell(header_row, 2).value or "") != (slot_time_label or ""):
+            ws_data.update_cell(header_row, 2, slot_time_label or "")
+        if finalized:
+            try:
+                ws_data.format(f"A{header_row}:E{header_row}", {
+                    "backgroundColor": {"red": 0.9, "green": 0.2, "blue": 0.2},
+                    "textFormat": {"bold": True}
+                })
+            except Exception:
+                pass
 
-    # --- 2) Bestehenden User-Block unter dem Header entfernen (bis zum nächsten Datum) ---
-    # Wir lesen Spalte A erneut und suchen den Beginn des nächsten Datum-Headers.
+    # --- 3) Blockgrenzen bestimmen (bis zum nächsten Header: Datum+Zeit) ---
     colA = ws_data.col_values(1)
-    last_index_in_colA = len(colA)
+    colB = ws_data.col_values(2)
+    nrows = max(len(colA), len(colB))
 
-    # Bereich des aktuellen Blocks:
     block_start = header_row + 1
-    block_end = block_start - 1  # wird gleich erhöht
+    block_end = block_start - 1
+    for i in range(block_start, nrows + 1):
+        a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
+        b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
+        if DATE_RX.match(a) and TIME_RX.match(b):
+            break  # nächster Game-Header beginnt hier
+        block_end = i
 
-    # Wir laufen ab block_start nach unten, solange:
-    # - in Spalte A KEIN neues Datum steht
-    # (User-Zeilen haben in Spalte A Namen, das ist ok; wir stoppen nur bei echtem Datumsmuster)
-    for idx in range(block_start, last_index_in_colA + 1):
-        val = str(colA[idx - 1]).strip() if idx - 1 < len(colA) else ""
-        if DATE_RX.match(val):
-            break  # nächster Tages-Header beginnt hier -> unseren Block bis idx-1
-        # sonst gehört Zeile noch zum aktuellen Block (auch wenn A leer ist)
-        block_end = idx
-
-    # vorhandene Userzeilen löschen (falls es welche gibt)
+    # --- 4) Alten User-Block unter diesem Header löschen ---
     if block_end >= block_start:
         try:
             ws_data.delete_rows(block_start, block_end - block_start + 1)
         except Exception:
-            # bei Problemen lieber still weitermachen; wir fügen gleich frisch ein
-            pass
+            pass  # falls nichts da/Fehler – nicht kritisch
 
-    # --- 3) Neue User-Zeilen einfügen und befüllen ---
-    n = len(user_rows)
-    if n > 0:
-        # n leere Zeilen direkt unter dem Header einfügen
-        ws_data.insert_rows([["", "", "", ""] for _ in range(n)], row=header_row + 1)
-
-        values = []
-        for display_name, uid, status in user_rows:
-            values.append([display_name, str(uid), status, ""])  # Note-Spalte leer
-        # A..D setzen
+    # --- 5) Neuen User-Block einfügen ---
+    if user_rows:
+        ws_data.insert_rows([["", "", "", ""] for _ in range(len(user_rows))], row=header_row + 1)
+        values = [[dn, str(uid), status, ""] for dn, uid, status in user_rows]
         ws_data.update(
-            f"A{header_row+1}:D{header_row+n}",
+            f"A{header_row+1}:D{header_row+len(user_rows)}",
             values,
-            value_input_option="RAW"
+            value_input_option="RAW",
         )
-
-    # --- 4) Header-Farbe final setzen ---
-    try:
-        if finalized:
-            # Finale -> ROT, nie wieder grün überschreiben
-            ws_data.format(f"A{header_row}:E{header_row}", {
-                "backgroundColor": {"red": 0.9, "green": 0.2, "blue": 0.2},
-                "textFormat": {"bold": True}
-            })
-        else:
-            # Nicht-final: grün nur, wenn wir den Header gerade NEU angelegt haben (oben bereits gesetzt).
-            # Existierende grüne/rote Header werden hier absichtlich NICHT überschrieben.
-            pass
-    except Exception:
-        pass
 
 def _att_sheets_mark_finalized(session_key: str):
     ws = _ws_data_or_none()
