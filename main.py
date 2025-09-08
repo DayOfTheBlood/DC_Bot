@@ -378,14 +378,16 @@ def _att_sheets_upsert_block(
     finalized: bool
 ) -> None:
     """
-    Pro Game genau ein Header:
+    Pro Game genau EIN Header:
       A: Datum (YYYY-MM-DD)
       B: Uhrzeit (HH:MM CET)
     Darunter User-Zeilen:
-      A: Name, B: User-ID, C: Status, D: Note (leer)
-    - Header wird nicht mit anderen Games zusammengeführt.
-    - Beim Einfügen von User-Zeilen wird deren Format explizit auf "normal" gesetzt,
-      dann erst der Header gefärbt (grün=aktiv, rot=final).
+      A: Name, B: User-ID, C: Status, D: Note (frei)
+
+    Inkrementelles Upsert:
+      - existierende User im Block werden aktualisiert
+      - neue User werden am Blockende hinzugefügt
+      - keine Duplikate
     """
     import re
 
@@ -418,10 +420,19 @@ def _att_sheets_upsert_block(
             except Exception:
                 pass
 
-    # --- 1) Header (Datum+Zeit) suchen ---
+    # -------- 0) Eingangs-List deduplizieren (falls doppelt geliefert) --------
+    dedup: dict[int, tuple[str, int, str]] = {}
+    for dn, uid, st in user_rows:
+        dedup[int(uid)] = (dn, int(uid), st)
+    new_users = list(dedup.values())
+    # Optional sort: Name case-insensitive
+    new_users.sort(key=lambda x: x[0].casefold())
+
+    # -------- 1) Header (genau dieses Datum + Uhrzeit) finden/erstellen --------
     colA = ws_data.col_values(1)  # Datum
     colB = ws_data.col_values(2)  # Uhrzeit
     nrows = max(len(colA), len(colB))
+
     header_row = None
     for i in range(START_ROW, nrows + 1):
         a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
@@ -430,17 +441,17 @@ def _att_sheets_upsert_block(
             header_row = i
             break
 
-    # --- 2) Header anlegen (OHNE Format) ---
     if header_row is None:
+        # Header (ohne Format) an Start_ROW einfügen
         ws_data.insert_row(["", "", "", ""], index=START_ROW)
         header_row = START_ROW
         ws_data.update(f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
     else:
-        # existierender Header -> Uhrzeit sicherstellen
+        # sicherstellen, dass B (Uhrzeit) korrekt ist
         if (ws_data.cell(header_row, 2).value or "") != (slot_time_label or ""):
             ws_data.update_cell(header_row, 2, slot_time_label or "")
 
-    # --- 3) Blockgrenzen bestimmen (bis zum nächsten Header) ---
+    # -------- 2) Block-Grenzen bestimmen (bis vor den nächsten Header) --------
     colA = ws_data.col_values(1)
     colB = ws_data.col_values(2)
     nrows = max(len(colA), len(colB))
@@ -451,30 +462,53 @@ def _att_sheets_upsert_block(
         a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
         b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
         if DATE_RX.match(a) and TIME_RX.match(b):
-            break  # nächster Game-Header
-        block_end = i
+            break  # nächster Game-Header beginnt hier
+        # Leere komplett am Blattende ignorieren (wir zählen nur „belegte“)
+        if a or b or any((ws_data.cell(i, c).value or "").strip() for c in (3, 4, 5)):
+            block_end = i
 
-    # --- 4) Alten User-Block löschen ---
+    # -------- 3) Bestehende User im Block einlesen (ID -> Zeile) --------
+    existing_by_id: dict[int, int] = {}
     if block_end >= block_start:
+        # Spalte B (User-ID) dieses Blocks auslesen
+        existing_ids = ws_data.get(f"B{block_start}:B{block_end}")  # Liste von Einzellisten oder leeren
+        for idx, cell in enumerate(existing_ids or [], start=block_start):
+            try:
+                raw = (cell[0] if isinstance(cell, list) and cell else "").strip()
+                if raw:
+                    uid = int(raw)
+                    existing_by_id[uid] = idx
+            except Exception:
+                continue
+
+    # -------- 4) Updates für vorhandene + Liste für neue vorbereiten --------
+    updates: list[tuple[int, list[str]]] = []  # (row_idx, [name, id, status])
+    adds: list[list[str]] = []                # [[name, id, status, ""] ...]
+
+    for dn, uid, st in new_users:
+        row_idx = existing_by_id.get(uid)
+        if row_idx:
+            updates.append((row_idx, [dn, str(uid), st]))
+        else:
+            adds.append([dn, str(uid), st, ""])  # Note leer
+
+    # -------- 5) Neue User am Blockende einfügen --------
+    if adds:
+        insert_at = (block_end + 1) if block_end >= block_start else block_start
+        ws_data.insert_rows([["", "", "", ""] for _ in range(len(adds))], row=insert_at)
+        ws_data.update(f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
+        # frisch eingefügte Zeilen entformatieren (weiß, nicht fett)
+        _format_users_plain(insert_at, insert_at + len(adds) - 1)
+        block_end = insert_at + len(adds) - 1  # neuen Block-Ende merken
+
+    # -------- 6) Vorhandene User aktualisieren --------
+    for row_idx, vals in updates:
         try:
-            ws_data.delete_rows(block_start, block_end - block_start + 1)
+            ws_data.update(f"A{row_idx}:C{row_idx}", [vals], value_input_option="RAW")
         except Exception:
             pass
 
-    # --- 5) Neue User-Zeilen einfügen + befüllen ---
-    if user_rows:
-        # Einfügen direkt unter dem Header (vererbt evtl. Header-Format -> resetten wir gleich)
-        ws_data.insert_rows([["", "", "", ""] for _ in range(len(user_rows))], row=header_row + 1)
-        values = [[dn, str(uid), status, ""] for dn, uid, status in user_rows]
-        ws_data.update(
-            f"A{header_row+1}:D{header_row+len(user_rows)}",
-            values,
-            value_input_option="RAW",
-        )
-        # --- 6) User-Bereich aktiv auf "plain" setzen (weiß, nicht fett) ---
-        _format_users_plain(header_row + 1, header_row + len(user_rows))
-
-    # --- 7) Header zuletzt formatieren (damit User-Zeilen NICHT das Format erben) ---
+    # -------- 7) Header zuletzt formatieren (damit darunter nichts Grün erbt) --------
     _format_header(header_row, bool(finalized))
 
 def _att_sheets_mark_finalized(session_key: str):
