@@ -141,9 +141,9 @@ else:
 ATTENDANCE_STORE_FILE = Path(__file__).with_name("attendance_store.json")
 
 GSHEETS_KEYFILE = Path(__file__).with_name("google_service_account.json")
-GSHEETS_SPREADSHEET_NAME = "DotB Attendance"
-GSHEETS_SHEET_TITLE = "Attendance"
-GSHEETS_LOG_TITLE = "AT-Log"
+GSHEETS_SPREADSHEET_NAME = "AT"
+GSHEETS_SHEET_TITLE = "AT"
+GSHEETS_LOG_TITLE = "LOGS"
 
 
 EMBED_COLOR = 0x790000
