@@ -3349,13 +3349,12 @@ async def at_update(ctx: commands.Context):
             _att_sheets_log(ctx.guild, ch, 0, "WARN", w)
     if all_live_rows:
         _att_sheets_append_raw(all_live_rows)
-    #backfilled = _att_backfill_sheets()
-    #summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
+    backfilled = _att_backfill_sheets()
+    summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert"
     if backfilled:
         summary += f", {backfilled} exportiert (Backfill)"
     summary += "."
 
-    summary = f"ATupdate: {total_games} Games gescannt, {total_final} finalisiert."
     if all_warnings:
         # zeige nur die ersten ~8 Warnungen, Rest andeuten
         head = "\n".join(f"• {w}" for w in all_warnings[:8])
