@@ -393,6 +393,7 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
         ws.insert_rows([[""] * SHEET_NUM_COLS] * needed_height, row=GSHEETS_START_ROW)
         _sheet_shift_indices(GSHEETS_START_ROW, needed_height)
         start = GSHEETS_START_ROW
+        slot_label = _att_slot_label_for_date(date_key)
         block = {"start": start, "height": needed_height, "finalized": bool(finalized)}
         blocks[session_key] = block
     else:
@@ -402,6 +403,7 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
             add = needed_height - current_h
             # unter dem Header nachschieben
             ws.insert_rows([[""] * SHEET_NUM_COLS] * add, row=start + 1)
+            slot_label = _att_slot_label_for_date(date_key)
             _sheet_shift_indices(start + 1, add)
             block["height"] = current_h + add
 
@@ -409,7 +411,8 @@ def _att_sheets_upsert_block(session_key: str, date_label: str,
     id_to_note, _order = _sheet_read_block(ws, block["start"], block["height"])
 
     # Header schreiben + einfärben
-    ws.update(f"A{block['start']}:D{block['start']}", [[date_label, "", "", ""]])
+    slot_label = _att_slot_label_for_date(date_key)
+    ws.update(f"A{block['start']}:D{block['start']}", [[date_label, slot_label, "", ""]])
     _sheet_format_header(ws, block["start"], finalized)
 
     # Body schreiben (A:D), Notes per ID wieder einsetzen
@@ -505,6 +508,34 @@ def _finalize_at(anchor_date_ymd: str, slot_dt: Optional[datetime]) -> datetime:
     y, mo, d = map(int, anchor_date_ymd.split("-"))
     dt_berlin = datetime(y, mo, d, 23, 59, 59, tzinfo=ATTENDANCE_TZ)
     return dt_berlin.astimezone(timezone.utc)
+
+def _att_slot_label_for_date(date_key: str) -> str:
+    """
+    Baut das Uhrzeiten-Label (z.B. '08:00, 20:00') für die Datumszeile.
+    Nimmt alle Sessions mit anchor_date == date_key, liest slot_time (ISO) und
+    formatiert in Europe/Berlin als HH:MM. Sortiert aufsteigend.
+    """
+    try:
+        sess = attendance_store.get("sessions", {})
+        times = []
+        for s in sess.values():
+            if s.get("anchor_date") != date_key:
+                continue
+            iso = s.get("slot_time")
+            if not iso:
+                continue
+            try:
+                dt = datetime.fromisoformat(iso)
+                # dt ist bereits tz-aware (Europe/Berlin) – zur Sicherheit in ATTENDANCE_TZ
+                dt_local = dt.astimezone(ATTENDANCE_TZ)
+                times.append(dt_local.strftime("%H:%M"))
+            except Exception:
+                continue
+        times = sorted(set(times))
+        return ", ".join(times)
+    except Exception:
+        return ""
+
 
 STATE_FILE = Path(__file__).with_name("state.json")
 TEAM_ROLES_FILE = Path(__file__).with_name("team_roles.json")
