@@ -524,7 +524,11 @@ def _att_sheets_upsert_block(
     # ---------- 6) Bestehende User aktualisieren + einfärben ----------
     for row_idx, vals in updates:
         try:
-            ws_data.update(f"A{row_idx}:C{row_idx}", [vals], value_input_option="RAW")
+            ws_data.update(
+                range_name=f"A{row_idx}:C{row_idx}",
+                values=[vals],
+                value_input_option="RAW",
+            )
         except Exception:
             pass
         _format_row_by_status(row_idx, vals[2])
