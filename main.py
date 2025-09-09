@@ -433,7 +433,7 @@ def _att_sheets_upsert_block(
         else:
             col = {"red": 1, "green": 1, "blue": 1}           # fallback weiß
         try:
-            ws_data.format(f"A{row}:E{row}", {
+            ws_data.format(f"C{row}:C{row}", {
                 "backgroundColor": col,
                 "textFormat": {"bold": False}
             })
