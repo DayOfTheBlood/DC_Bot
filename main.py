@@ -3883,7 +3883,15 @@ async def _attendance_startup_catchup_once():
 
 
 
-token = os.getenv("TOKEN")
-if token is None:
-    raise ValueError("TOKEN environment variable not set!")
-bot.run(token)
+# --- entrypoint ---
+if __name__ == "__main__":
+    import os, traceback
+    token = os.getenv("TOKEN")
+    if not token:
+        raise SystemExit("TOKEN env var not set. Export TOKEN in the shell or add it to the systemd unit.")
+    try:
+        bot.run(token)
+    except Exception as e:
+        print("[FATAL] bot.run() crashed:", e)
+        traceback.print_exc()
+        raise
