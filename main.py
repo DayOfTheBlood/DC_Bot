@@ -3874,12 +3874,10 @@ async def _attendance_startup_catchup_once():
 async def at_clear(ctx: commands.Context):
     """
     Leert die attendance_store.json nach y/yes-Bestätigung.
-    Löscht ALLE Daten: sessions, finalized, blacklist, sheet_blocks.
     """
     prompt = await ctx.send(
-        "**ACHTUNG:** Das löscht den *kompletten* Attendance-Tracker-Store "
-        "(sessions, finalized, blacklist, sheet_blocks) für alle Server.\n"
-        "Antwort mit `y` zum Bestätigen oder `n` zum Abbrechen. (Timeout 20s)"
+        "Do you want to clear the AT Json?"
+        "Y or N ?"
     )
 
     def _chk(m: discord.Message) -> bool:
@@ -3893,7 +3891,7 @@ async def at_clear(ctx: commands.Context):
         reply: discord.Message = await bot.wait_for("message", check=_chk, timeout=20)
     except asyncio.TimeoutError:
         try:
-            await prompt.edit(content="Abgebrochen (keine Antwort).")
+            await prompt.edit(content="Aborted.")
             await prompt.delete(delay=5)
         except Exception:
             pass
@@ -3901,7 +3899,7 @@ async def at_clear(ctx: commands.Context):
 
     if reply.content.lower() in {"n", "no"}:
         try:
-            await prompt.edit(content="Abgebrochen.")
+            await prompt.edit(content="Aborted.")
             await reply.delete()
             await prompt.delete(delay=5)
         except Exception:
@@ -3909,8 +3907,17 @@ async def at_clear(ctx: commands.Context):
         return
 
     # --- bestätigter Wipe ---
-    keep_bl = attendance_store.get("blacklist", {})
-    attendance_store = {"sessions": {}, "finalized": {}, "blacklist": keep_bl, "sheet_blocks": {}}
+    # Falls du die Blacklist behalten willst: auskommentieren/aktivieren
+    keep_blacklist = False
+    saved_bl = attendance_store.get("blacklist", {}) if keep_blacklist else {}
+
+    attendance_store.clear()
+    attendance_store.update({
+        "sessions": {},
+        "finalized": {},
+        "blacklist": saved_bl,   # { } wenn keep_blacklist = False
+        "sheet_blocks": {},
+    })
     _attendance_save_store()
 
     try:
@@ -3919,7 +3926,8 @@ async def at_clear(ctx: commands.Context):
     except Exception:
         pass
 
-    await ctx.send("✅ Attendance-Tracker JSON geleert (attendance_store.json).")
+    await ctx.send("Attendance-Tracker JSON cleared.")
+
 
 
 
