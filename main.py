@@ -3869,6 +3869,58 @@ async def _attendance_startup_catchup_once():
     except Exception:
         pass
 
+@bot.command(name="ATclear")
+@has_any_role(STAFF_ROLES)
+async def at_clear(ctx: commands.Context):
+    """
+    Leert die attendance_store.json nach y/yes-Bestätigung.
+    Löscht ALLE Daten: sessions, finalized, blacklist, sheet_blocks.
+    """
+    prompt = await ctx.send(
+        "**ACHTUNG:** Das löscht den *kompletten* Attendance-Tracker-Store "
+        "(sessions, finalized, blacklist, sheet_blocks) für alle Server.\n"
+        "Antwort mit `y` zum Bestätigen oder `n` zum Abbrechen. (Timeout 20s)"
+    )
+
+    def _chk(m: discord.Message) -> bool:
+        return (
+            m.author.id == ctx.author.id
+            and m.channel.id == ctx.channel.id
+            and m.content.lower() in {"y", "yes", "n", "no"}
+        )
+
+    try:
+        reply: discord.Message = await bot.wait_for("message", check=_chk, timeout=20)
+    except asyncio.TimeoutError:
+        try:
+            await prompt.edit(content="Abgebrochen (keine Antwort).")
+            await prompt.delete(delay=5)
+        except Exception:
+            pass
+        return
+
+    if reply.content.lower() in {"n", "no"}:
+        try:
+            await prompt.edit(content="Abgebrochen.")
+            await reply.delete()
+            await prompt.delete(delay=5)
+        except Exception:
+            pass
+        return
+
+    # --- bestätigter Wipe ---
+    keep_bl = attendance_store.get("blacklist", {})
+    attendance_store = {"sessions": {}, "finalized": {}, "blacklist": keep_bl, "sheet_blocks": {}}
+    _attendance_save_store()
+
+    try:
+        await reply.delete()
+        await prompt.delete()
+    except Exception:
+        pass
+
+    await ctx.send("✅ Attendance-Tracker JSON geleert (attendance_store.json).")
+
 
 
 
