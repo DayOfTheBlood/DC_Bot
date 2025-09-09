@@ -12,7 +12,17 @@ try:
 except Exception:
     ZoneInfo = None
 from typing import Optional, Literal
-
+import time, aiohttp
+while True:
+    try:
+        bot.run(token)
+        break
+    except aiohttp.ClientConnectorError as e:
+        print(f"[net] connect failed: {e}; retry in 30s")
+        time.sleep(30)
+    except Exception as e:
+        print(f"[bot] crashed: {e}; retry in 30s")
+        time.sleep(30)
 
 intents = discord.Intents.default()
 intents.message_content = True
