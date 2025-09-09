@@ -3519,9 +3519,19 @@ async def at_update(ctx: commands.Context):
         return
     channels = []
     for cid in ATTENDANCE_CHANNEL_IDS:
-        ch = ctx.guild.get_channel(cid) or await ctx.guild.fetch_channel(cid)
-        if isinstance(ch, discord.TextChannel):
-            channels.append(ch)
+        ch = bot.get_channel(cid) or ctx.guild.get_channel(cid)
+        if ch is None:
+            try:
+                ch = await bot.fetch_channel(cid)
+            except Exception:
+                continue  # nicht vorhanden/kein Zugriff -> überspringen
+        if not isinstance(ch, discord.TextChannel):
+            continue
+        if ch.guild.id != ctx.guild.id:
+            # Fremd-Guild -> bewusst ignorieren (optional: Warnung loggen)
+            continue
+        channels.append(ch)
+
 
     total_games = 0
     total_final = 0
