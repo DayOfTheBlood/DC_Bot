@@ -427,7 +427,7 @@ def _att_sheets_upsert_block(
         if s in ("C", "R", "C+R"):
             col = {"red": 1.0, "green": 1.0, "blue": 0.05}   # gelb
         elif s == "X":
-            col = {"red": 1.0, "green": 0.25, "blue": 0.05}   # orange
+            col = {"red": 1.0, "green": 0.30, "blue": 0.05}   # orange
         elif s == "NR":
             col = {"red": 0.7, "green": 0.01, "blue": 0.01}  # dunkles rot
         else:
