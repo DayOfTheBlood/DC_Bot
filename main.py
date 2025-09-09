@@ -731,6 +731,17 @@ def _active_players_in_team(guild: discord.Guild, team_role: discord.Role) -> li
     """Alle aktiven Spieler (ohne Coach/Manager) mit genau dieser Teamrolle."""
     return [m for m in guild.members if team_role in m.roles and not _is_exempt_from_roster(m)]
 
+async def _get_text_channel_in_guild(guild: discord.Guild, cid: int) -> discord.TextChannel | None:
+    ch = bot.get_channel(cid) or guild.get_channel(cid)
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(cid)
+        except (discord.InvalidData, discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+    if not isinstance(ch, discord.TextChannel):
+        return None
+    return ch if ch.guild.id == guild.id else None
+
 async def _delete_messages_later(*msgs: discord.Message, delay: int = 10):
     await asyncio.sleep(delay)
     for m in msgs:
