@@ -13,16 +13,6 @@ except Exception:
     ZoneInfo = None
 from typing import Optional, Literal
 import time, aiohttp
-while True:
-    try:
-        bot.run(token)
-        break
-    except aiohttp.ClientConnectorError as e:
-        print(f"[net] connect failed: {e}; retry in 30s")
-        time.sleep(30)
-    except Exception as e:
-        print(f"[bot] crashed: {e}; retry in 30s")
-        time.sleep(30)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -3883,15 +3873,21 @@ async def _attendance_startup_catchup_once():
 
 
 
-# --- entrypoint ---
 if __name__ == "__main__":
-    import os, traceback
-    token = os.getenv("TOKEN")
-    if not token:
-        raise SystemExit("TOKEN env var not set. Export TOKEN in the shell or add it to the systemd unit.")
-    try:
-        bot.run(token)
-    except Exception as e:
-        print("[FATAL] bot.run() crashed:", e)
-        traceback.print_exc()
-        raise
+    import os, time
+    import aiohttp
+
+    TOKEN = os.getenv("TOKEN")
+    if not TOKEN:
+        raise SystemExit("TOKEN env var not set. Setze Environment=TOKEN=... in systemd oder export TOKEN=...")
+
+    while True:
+        try:
+            bot.run(TOKEN)  # discord.py macht Reconnects; diese Schleife fängt DNS/Netzfehler ab
+            break
+        except aiohttp.ClientConnectorError as e:
+            print(f"[net] connect failed: {e}; retry in 30s")
+            time.sleep(30)
+        except Exception as e:
+            print(f"[bot] crashed: {e}; retry in 30s")
+            time.sleep(30)
