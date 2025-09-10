@@ -3705,13 +3705,27 @@ async def _attendance_autoscan_loop():
                             # sollte nicht vorkommen (wird im Scan gesetzt), Sicherheitsnetz
                             continue
 
-                        # Upsert in die Tabelle (inkl. Datumskopf + Slotliste in Spalte B)
+                        # --- Zeitlabel aus ses["slot_time"] (ISO) -> "HH:MM" in ATTENDANCE_TZ
+                        slot_label = ""
+                        iso = ses.get("slot_time") or ""
+                        if iso:
+                            try:
+                                dt = datetime.fromisoformat(iso)
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=ATTENDANCE_TZ)
+                                slot_label = dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
+                            except Exception:
+                                pass
+                        
+                        # Upsert in die Tabelle (inkl. Datumskopf + Slot in Spalte B)
                         ok = _att_sheets_upsert_block(
                             session_key=skey,
                             date_label=date_label,
+                            slot_time_label=slot_label,   # <— WICHTIG: jetzt wird Spalte B korrekt
                             user_rows=user_rows,
-                            finalized=is_final
+                            finalized=is_final,
                         )
+
                         if not ok:
                             # optional loggen
                             _att_sheets_log(guild, guild.text_channels[0] if guild.text_channels else None,
