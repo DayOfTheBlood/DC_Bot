@@ -3471,7 +3471,6 @@ async def _att_scan_channel(
                     user_rows=user_rows,
                     finalized=is_final
                 )
-            )
             except Exception as e:
                 if not silent:
                     warnings.append(f"Sheet (final) recolor failed for Game {gm.id}: {e}")
