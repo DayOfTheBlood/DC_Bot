@@ -552,16 +552,29 @@ def _att_sheets_append_rows(snapshot: dict, rows: list[dict], note: str = "") ->
     if not out:
         return False
     ws_data, _ = out
+
+    # ISO -> "HH:MM" (lokal)
+    slot_iso = snapshot.get("slot_time") or ""
+    slot_label = ""
+    if slot_iso:
+        try:
+            dt = datetime.fromisoformat(slot_iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ATTENDANCE_TZ)
+            slot_label = dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
+        except Exception:
+            slot_label = ""
+
     to_append = []
     for r in rows:
         to_append.append([
             snapshot.get("date") or "",
-            snapshot.get("slot_time") or "",
+            slot_label,                         # <--- statt ISO
             str(r["user_id"]),
             r["display_name"],
             r["status"],
             snapshot.get("snapshot_time") or "",
-            note,  # <- hier landet INTERIM / FINAL
+            note,
         ])
     if to_append:
         ws_data.append_rows(to_append, value_input_option="RAW")
@@ -3443,10 +3456,25 @@ async def _att_scan_channel(
                 # simple rows aus 'rows' bauen: (Name, ID, Status)
                 user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
                 _att_sheets_upsert_block(
-                    session_key=key,                      # "<guild_id>:<message_id>"
-                    date_label=anchor_ymd,               # "YYYY-MM-DD"
-                    user_rows=user_rows_simple,          # [(name, id, status), ...]
-                    finalized=True                       # -> Kopfzeile ROT
+                    # Zeitlabel aus ses["slot_time"] (ISO) -> "HH:MM" in ATTENDANCE_TZ
+                    slot_label = ""
+                    iso = ses.get("slot_time") or ""
+                    if iso:
+                        try:
+                            dt = datetime.fromisoformat(iso)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=ATTENDANCE_TZ)
+                            slot_label = dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
+                        except Exception:
+                            pass
+                    
+                    ok = _att_sheets_upsert_block(
+                        session_key=skey,
+                        date_label=date_label,
+                        slot_time_label=slot_label,     # <--- WICHTIG
+                        user_rows=user_rows,
+                        finalized=is_final
+                    )
                 )
             except Exception as e:
                 if not silent:
