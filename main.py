@@ -3453,29 +3453,25 @@ async def _att_scan_channel(
                     warnings.append(f"Sheet (final) recolor failed for Game {gm.id}: {e}")
 
             try:
-                # simple rows aus 'rows' bauen: (Name, ID, Status)
-                user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
-                _att_sheets_upsert_block(
-                    # Zeitlabel aus ses["slot_time"] (ISO) -> "HH:MM" in ATTENDANCE_TZ
-                    slot_label = ""
-                    iso = ses.get("slot_time") or ""
-                    if iso:
-                        try:
-                            dt = datetime.fromisoformat(iso)
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=ATTENDANCE_TZ)
-                            slot_label = dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
-                        except Exception:
-                            pass
+                slot_label = ""
+                iso = ses.get("slot_time") or ""
+                if iso:
+                    try:
+                        dt = datetime.fromisoformat(iso)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=ATTENDANCE_TZ)
+                        slot_label = dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
+                    except Exception:
+                        pass
                     
-                    ok = _att_sheets_upsert_block(
-                        session_key=skey,
-                        date_label=date_label,
-                        slot_time_label=slot_label,     # <--- WICHTIG
-                        user_rows=user_rows,
-                        finalized=is_final
-                    )
+                ok = _att_sheets_upsert_block(
+                    session_key=skey,
+                    date_label=date_label,
+                    slot_time_label=slot_label,     # <--- WICHTIG
+                    user_rows=user_rows,
+                    finalized=is_final
                 )
+            )
             except Exception as e:
                 if not silent:
                     warnings.append(f"Sheet (final) recolor failed for Game {gm.id}: {e}")
