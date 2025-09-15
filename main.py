@@ -329,6 +329,14 @@ def _ws_data_or_none():
     ws_data, _ = out
     return ws_data
 
+import asyncio
+
+async def _gs_call(ws, method: str, *args, **kwargs):
+    """führt einen blockierenden gspread-Methodenaufruf im Thread aus."""
+    func = getattr(ws, method)
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
 def _sheet_format_header(ws, row: int, finalized: bool):
     # grün (interim) / rot (final) + fett
     color = {"red": 0.2, "green": 0.9, "blue": 0.2} if not finalized else {"red": 0.9, "green": 0.2, "blue": 0.2}
@@ -447,94 +455,61 @@ def _att_sheets_upsert_block(
     new_users = list(dedup.values())
     new_users.sort(key=lambda x: x[0].casefold())
 
-    # ---------- 1) Header finden/erstellen ----------
-    colA = ws_data.col_values(1)  # Datum
-    colB = ws_data.col_values(2)  # Uhrzeit
-    nrows = max(len(colA), len(colB))
-
-    header_row = None
-    for i in range(START_ROW, nrows + 1):
-        a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
-        b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
-        if a == date_label and b == (slot_time_label or ""):
-            header_row = i
-            break
-
+    # 1) Header finden/erstellen
+    colA = await _gs_call(ws_data, "col_values", 1)
+    colB = await _gs_call(ws_data, "col_values", 2)
+    
     if header_row is None:
-        ws_data.insert_row(["", "", "", ""], index=START_ROW)
+        await _gs_call(ws_data, "insert_row", ["", "", "", ""], index=START_ROW)
         header_row = START_ROW
-        ws_data.update(f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
+        await _gs_call(ws_data, "update", f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
     else:
-        if (ws_data.cell(header_row, 2).value or "") != (slot_time_label or ""):
-            ws_data.update_cell(header_row, 2, (slot_time_label or ""))
-
-    # ---------- 2) Block-Grenzen bestimmen ----------
-    colA = ws_data.col_values(1)
-    colB = ws_data.col_values(2)
-    nrows = max(len(colA), len(colB))
-
-    block_start = header_row + 1
-    block_end = block_start - 1
-    for i in range(block_start, nrows + 1):
-        a = (colA[i - 1] if i - 1 < len(colA) else "").strip()
-        b = (colB[i - 1] if i - 1 < len(colB) else "").strip()
-        if DATE_RX.match(a) and TIME_RX.match(b):
-            break  # nächster Header
-        # belegte Zeile?
-        if a or b or any((ws_data.cell(i, c).value or "").strip() for c in (3, 4, 5)):
-            block_end = i
-
-    # ---------- 3) Vorhandene User im Block (ID->Zeile) ----------
-    existing_by_id: dict[int, int] = {}
+        cell_b = await _gs_call(ws_data, "cell", header_row, 2)
+        if (getattr(cell_b, "value", "") or "") != (slot_time_label or ""):
+            await _gs_call(ws_data, "update_cell", header_row, 2, (slot_time_label or ""))
+    
+    # 2) Block-Grenzen bestimmen
+    colA = await _gs_call(ws_data, "col_values", 1)
+    colB = await _gs_call(ws_data, "col_values", 2)
+    # ... in der Schleife:
+    if a or b or any(((await _gs_call(ws_data, "cell", i, c)).value or "").strip() for c in (3,4,5)):
+        block_end = i
+    
+    # 3) Vorhandene User im Block
     if block_end >= block_start:
-        existing_ids = ws_data.get(f"B{block_start}:B{block_end}")  # Liste von [value]
-        for idx, cell in enumerate(existing_ids or [], start=block_start):
-            try:
-                raw = (cell[0] if isinstance(cell, list) and cell else "").strip()
-                if raw:
-                    uid = int(raw)
-                    existing_by_id[uid] = idx
-            except Exception:
-                continue
-
-    # ---------- 4) Updates & Adds vorbereiten ----------
-    updates: list[tuple[int, list[str]]] = []  # (row_idx, [name, id, status])
-    adds: list[list[str]] = []                # [[name, id, status, ""]]
-
-    for dn, uid, st in new_users:
-        row_idx = existing_by_id.get(uid)
-        if row_idx:
-            updates.append((row_idx, [dn, str(uid), st]))
-        else:
-            adds.append([dn, str(uid), st, ""])
-
-    # ---------- 5) Neue User am Blockende einfügen ----------
+        existing_ids = await _gs_call(ws_data, "get", f"B{block_start}:B{block_end}")
+    
+    # 5) Neue User einfügen
     if adds:
         insert_at = (block_end + 1) if block_end >= block_start else block_start
-        ws_data.insert_rows([["", "", "", ""] for _ in range(len(adds))], row=insert_at)
-        ws_data.update(f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
-        # zuerst neutral entformatieren …
-        _format_users_plain(insert_at, insert_at + len(adds) - 1)
-        # … dann je Zeile nach Status einfärben
+        await _gs_call(ws_data, "insert_rows", [["", "", "", ""] for _ in range(len(adds))], row=insert_at)
+        await _gs_call(ws_data, "update", f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
+        await _gs_call(ws_data, "format", f"A{insert_at}:E{insert_at + len(adds) - 1}", {
+            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+            "textFormat": {"bold": False}
+        })
+        # Zeilen einfärben (Status)
         for offset, row_vals in enumerate(adds):
             st = row_vals[2]
-            _format_row_by_status(insert_at + offset, st)
-        block_end = insert_at + len(adds) - 1
-
-    # ---------- 6) Bestehende User aktualisieren + einfärben ----------
+            await _gs_call(ws_data, "format", f"C{insert_at + offset}:C{insert_at + offset}", {
+                "backgroundColor": _color_for_status(st), "textFormat": {"bold": False}
+            })
+    
+    # 6) Updates
     for row_idx, vals in updates:
         try:
-            ws_data.update(
-                range_name=f"A{row_idx}:C{row_idx}",
-                values=[vals],
-                value_input_option="RAW",
-            )
+            await _gs_call(ws_data, "update", range_name=f"A{row_idx}:C{row_idx}", values=[vals], value_input_option="RAW")
         except Exception:
             pass
-        _format_row_by_status(row_idx, vals[2])
-
-    # ---------- 7) Header zuletzt formatieren ----------
-    _format_header(header_row, bool(finalized))
+        await _gs_call(ws_data, "format", f"C{row_idx}:C{row_idx}", {
+            "backgroundColor": _color_for_status(vals[2]), "textFormat": {"bold": False}
+        })
+    
+    # 7) Header formatieren
+    await _gs_call(ws_data, "format", f"A{header_row}:E{header_row}", {
+        "backgroundColor": ({"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}),
+        "textFormat": {"bold": True}
+    })
 
 def _att_sheets_mark_finalized(session_key: str):
     ws = _ws_data_or_none()
