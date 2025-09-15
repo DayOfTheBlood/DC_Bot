@@ -669,7 +669,7 @@ EVENT_SCAN_INTERVAL_SEC = 60
 TEAM_SCAN_INTERVAL_SEC = 30
 REGIONS = {"EU", "NAE", "NAW", "RU", "SA", "OCE"}
 PLATFORMS = {"PC", "PS", "XBOX", "SWITCH"}
-_ADD_SPLIT_RE = re.compile(r"\s*-\s*")                
+_ADD_SPLIT_RE = re.compile(r"\s*|\s*")                
 _DBD_ID_RE   = re.compile(r"^[^\s#]{1,32}#[A-Za-z0-9]{4}$")
 ALLOWED_KILLER_KEYS = {
     normalize_key(k): k for k in set(killer_pool) | set(killer_map_lookup.keys())
@@ -705,12 +705,12 @@ def _classify_add_token(tok: str) -> tuple[str, str] | None:
 
 def parse_add_tail(tail: str) -> tuple[str|None,str|None,str|None,str|None]:
     """
-    tail: alles hinter der @Mention, getrennt durch ' - '
+    tail: alles hinter der @Mention, getrennt durch ' | '
     return: (platform, region, dbdid, error)
     """
     platform = region = dbdid = None
     if not tail:
-        return None, None, None, "Missing data. Format: `!add @User - <Platform> - <Region> - <DBD_ID>`"
+        return None, None, None, "Missing data. Format: `!add @User | <Platform> | <Region> | <DBD_ID>`"
 
     parts = [p for p in _ADD_SPLIT_RE.split(tail) if p.strip()]
     for p in parts:
@@ -724,7 +724,7 @@ def parse_add_tail(tail: str) -> tuple[str|None,str|None,str|None,str|None]:
 
     missing = [lbl for lbl, val in [("Platform", platform), ("Region", region), ("DBD ID", dbdid)] if not val]
     if missing:
-        return None, None, None, f"Missing: {', '.join(missing)}. Use e.g. `PC - EU - Name#1a2b`"
+        return None, None, None, f"Missing: {', '.join(missing)}. Use e.g. `PC | EU | Name#1a2b`"
     return platform, region, dbdid, None
 
 def _member_team_roles(member: discord.Member) -> list[discord.Role]:
@@ -2930,7 +2930,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
         return await _temp_reply(ctx, "Please use this command in the designated team management channel.")
 
     if member is None:
-        return await _temp_reply(ctx, "Usage: `!add @User - <Platform> - <Region> - <DBD_ID>`")
+        return await _temp_reply(ctx, "Usage: `!add @User | <Platform> | <Region> | <DBD_ID>`")
 
     # Zusatzdaten parsen (Reihenfolge egal)
     platform, region, dbdid, err = parse_add_tail(tail)
