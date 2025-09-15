@@ -2776,7 +2776,7 @@ async def teams_cmd(ctx: commands.Context):
     store = _load_team_roles_store()
     data = store.get("guilds", {}).get(str(ctx.guild.id))
     if not data:
-        await ctx.send("No team role snapshot found yet. The autoscan runs every 5 minutes.")
+        await ctx.send("No team role snapshot found yet. The autoscan runs every 30 seconds.")
         return
 
     start_id = data.get("anchors", {}).get("start")
@@ -2940,7 +2940,7 @@ async def add_member_to_team(ctx: commands.Context, member: discord.Member | Non
 
     team_role_ids = _team_role_ids_from_store(ctx.guild.id)
     if not team_role_ids:
-        await ctx.send("No team roles snapshot found yet. Wait for the autoscan (every 5 min) or set up anchors.")
+        await ctx.send("No team roles snapshot found yet. Wait for the autoscan (every 30 seconds) or set up anchors.")
         return
 
     author_team_roles = [r for r in ctx.author.roles if r.id in team_role_ids]
@@ -3029,7 +3029,7 @@ async def remove_member_from_team(ctx: commands.Context, member: discord.Member 
 
     team_role_ids = _team_role_ids_from_store(ctx.guild.id)
     if not team_role_ids:
-        await ctx.send("No team roles snapshot found yet. Wait for the autoscan (every 5 min) or set up anchors.")
+        await ctx.send("No team roles snapshot found yet. Wait for the autoscan (every 30 seconds) or set up anchors.")
         return
 
     # Aufrufer muss genau eine Teamrolle haben
@@ -3076,7 +3076,7 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
     store = _load_team_roles_store()
     gdata = store.get("guilds", {}).get(str(ctx.guild.id))
     if not gdata:
-        await ctx.send("No team role snapshot found yet. The autoscan runs every 5 minutes.")
+        await ctx.send("No team role snapshot found yet. The autoscan runs every 30 seconds.")
         return
 
     teams = gdata.get("teams", [])
