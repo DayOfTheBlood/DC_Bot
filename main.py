@@ -378,7 +378,7 @@ def _sheet_read_block(ws, start: int, height: int) -> tuple[dict[str, str], list
             order.append(uid)
     return id_to_note, order
 
-def _att_sheets_upsert_block(
+async def _att_sheets_upsert_block(
     session_key: str,
     date_label: str,             # 'YYYY-MM-DD'
     slot_time_label: str,        # 'HH:MM' (CET) oder ''
