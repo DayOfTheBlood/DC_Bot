@@ -170,7 +170,7 @@ def _att_backfill_sheets() -> int:
     """Exportiert alle finalisierten Sessions, die noch kein 'exported'=True haben."""
     count = 0
     finals = attendance_store.get("finalized", {})
-    for key, entry in list(finals.items()):
+    for skey, entry in list(finals.items()):
         if entry.get("exported"):
             continue
         snapshot = entry.get("snapshot") or {}
@@ -3776,7 +3776,7 @@ async def _attendance_autoscan_loop():
                         
                         # Upsert in die Tabelle (inkl. Datumskopf + Slot in Spalte B)
                         ok = await _att_sheets_upsert_block(
-                            session_key=key,
+                            session_key=skey,
                             date_label=date_label,
                             slot_time_label=slot_label,   # <— WICHTIG: jetzt wird Spalte B korrekt
                             user_rows=user_rows,
