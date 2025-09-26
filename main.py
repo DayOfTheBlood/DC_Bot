@@ -540,7 +540,6 @@ async def _att_sheets_upsert_block(
                 updates.append((row_idx, [name, uid, st]))
         else:
             adds.append([name, uid, st, ""])
-
     
     # 5) Neue User einfügen
     if adds:
@@ -3389,13 +3388,25 @@ async def _att_scan_channel(
                     live_rows.append((dname, uid, st))
         
                 # Live upsert (grün) – aber nur solange NICHT final
+                slot_label = ""
+                iso = ses.get("slot_time") or ""
+                if iso:
+                    try:
+                        dt = datetime.fromisoformat(iso)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=ATTENDANCE_TZ)
+                        slot_label = dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M")
+                    except Exception:
+                        pass
+                
                 await _att_sheets_upsert_block(
-                    session_key=key,
-                    date_label=anchor_ymd,
+                    session_key=skey,
+                    date_label=date_label,
                     slot_time_label=slot_label,
-                    user_rows=live_rows,
-                    finalized=False
+                    user_rows=user_rows,
+                    finalized=is_final
                 )
+
             except Exception as e:
                 if not silent:
                     warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
