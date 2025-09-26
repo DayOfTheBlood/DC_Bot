@@ -489,29 +489,50 @@ async def _att_sheets_upsert_block(
     new_users = list(dedup.values())
     new_users.sort(key=lambda x: x[0].casefold())
 
-    # 1) Header finden/erstellen
+    # 1) Header finden/erstellen  (E=SessionKey ist Primärschlüssel)
     colA = await _gs_call(ws_data, "col_values", 1)
     colB = await _gs_call(ws_data, "col_values", 2)
-    
+    colE = await _gs_call(ws_data, "col_values", 5)  # <-- NEU
+
     header_row = None
-    for i in range(START_ROW, max(len(colA), len(colB)) + 1):
-        a = (colA[i-1] if i-1 < len(colA) else "").strip()
-        b = (colB[i-1] if i-1 < len(colB) else "").strip()
-        if a == date_label and b == (slot_time_label or ""):
+
+    # a) Primär: exakten Header über SessionKey in E finden
+    for i in range(START_ROW, max(len(colA), len(colB), len(colE)) + 1):
+        e = (colE[i-1] if i-1 < len(colE) else "").strip()
+        if e == session_key:
             header_row = i
             break
-    
+
+    # b) Fallback: alter Modus (A/B) – nur falls E noch nicht gesetzt (Alt-Bestand)
     if header_row is None:
+        for i in range(START_ROW, max(len(colA), len(colB)) + 1):
+            a = (colA[i-1] if i-1 < len(colA) else "").strip()
+            b = (colB[i-1] if i-1 < len(colB) else "").strip()
+            if a == date_label and b == (slot_time_label or ""):
+                header_row = i
+                break
+
+    if header_row is None:
+        # neuen Header am START_ROW anlegen
         await _gs_call(ws_data, "insert_row", ["", "", "", ""], index=START_ROW)
         header_row = START_ROW
+        # andere gespeicherte Blöcke verschieben
+        _sheet_shift_indices(START_ROW, +1)
+        # A..E in einem Rutsch schreiben: [Date, Time, "", "", SessionKey]
         await _gs_call(
-            ws_data, "update", f"A{header_row}:B{header_row}",
-            [[date_label, slot_time_label or ""]], value_input_option="RAW"
+            ws_data, "update", f"A{header_row}:E{header_row}",
+            [[date_label, (slot_time_label or ""), "", "", session_key]],
+            value_input_option="RAW"
         )
     else:
+        # Bestehenden Header ggf. korrigieren (A/B drift)
         cell_b = await _gs_call(ws_data, "cell", header_row, 2)
         if (getattr(cell_b, "value", "") or "") != (slot_time_label or ""):
             await _gs_call(ws_data, "update_cell", header_row, 2, (slot_time_label or ""))
+        # sicherstellen, dass E=SessionKey gesetzt ist
+        cell_e = await _gs_call(ws_data, "cell", header_row, 5)
+        if (getattr(cell_e, "value", "") or "") != session_key:
+            await _gs_call(ws_data, "update_cell", header_row, 5, session_key)
     
     # 2) Block-Grenzen bestimmen (ohne cell()-Loops)
     block_start = header_row + 1
@@ -564,6 +585,7 @@ async def _att_sheets_upsert_block(
     if adds:
         insert_at = (block_end + 1) if block_end >= block_start else block_start
         await _gs_call(ws_data, "insert_rows", [["", "", "", ""] for _ in range(len(adds))], row=insert_at)
+        _sheet_shift_indices(insert_at, len(adds))
         await _gs_call(ws_data, "update", f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
         await _gs_call(ws_data, "format", f"A{insert_at}:E{insert_at + len(adds) - 1}", {
             "backgroundColor": {"red": 1, "green": 1, "blue": 1},
@@ -591,6 +613,11 @@ async def _att_sheets_upsert_block(
         "backgroundColor": ({"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}),
         "textFormat": {"bold": True}
     })
+    # --- Store aktualisieren: Start/Height/Final-Flag
+    total_height = 1 + max(0, (block_end - block_start + 1))
+    blk = {"start": int(header_row), "height": int(total_height), "finalized": bool(finalized)}
+    attendance_store.setdefault("sheet_blocks", {})[session_key] = blk
+    _attendance_save_store()
     return True
 
 def _att_sheets_mark_finalized(session_key: str):
@@ -998,6 +1025,17 @@ def _find_team_role_by_name_from_store(guild: discord.Guild, team_name: str) -> 
     # Fallback (nicht so verlässlich, aber praktisch)
     return discord.utils.find(lambda r: r.name.casefold() == wanted, guild.roles)
 
+def _is_event_scheduled(ev) -> bool:
+    """Robuste Status-Prüfung unabhängig vom Enum-Typ/Namespace."""
+    st = getattr(ev, "status", None)
+    if st is None:
+        return False
+    # Enum in d.py/disnake/py-cord hat .name; Fallback: str(...)
+    name = getattr(st, "name", None)
+    if not name:
+        name = str(st)
+    return str(name).lower() == "scheduled"
+
 async def _events_autoscan_loop():
     """Baut alle ~2min einen Index: Teamrolle -> nächster Match-Start (UTC)."""
     global _match_index
@@ -1013,7 +1051,7 @@ async def _events_autoscan_loop():
                 per_team: dict[int, datetime] = {}
                 for ev in events:
                     # Wir berücksichtigen nur geplante, zukünftige Events mit 'TeamA vs TeamB' im Titel
-                    if getattr(ev, "status", None) != discord.GuildScheduledEventStatus.scheduled:
+                    if not _is_event_scheduled(ev):
                         continue
                     if not ev.start_time:
                         continue
