@@ -329,6 +329,11 @@ def _gs_open_or_none():
         ws_log = sh.add_worksheet(title=GSHEETS_LOG_TITLE, rows=1000, cols=6)
         ws_log.append_row(["When","Guild","Channel","MessageID","Level","Message"])
 
+    try:
+        ws_data.format('B:B', {'numberFormat': {'type': 'TEXT'}})
+    except Exception:
+        pass
+
     _GS_CACHE = (ws_data, ws_log)
     return _GS_CACHE
 
@@ -551,9 +556,9 @@ async def _att_sheets_upsert_block(
         if uid in existing_by_uid:
             row_idx, old_name, old_st = existing_by_uid[uid]
             if old_name != name or old_st != st:
-                updates.append((row_idx, [name, uid, st]))
+                updates.append((row_idx, [name, f"'{uid}", st]))
         else:
-            adds.append([name, uid, st, ""])
+            adds.append([name, f"'{uid}", st, ""])
     
     # 5) Neue User einfügen
     if adds:
@@ -619,10 +624,11 @@ def _att_sheets_append_rows(snapshot: dict, rows: list[dict], note: str = "") ->
 
     to_append = []
     for r in rows:
+        uid_str = str(r["user_id"])
         to_append.append([
             snapshot.get("date") or "",
             slot_label,                         # <--- statt ISO
-            str(r["user_id"]),
+            f"'{uid_str}", 
             r["display_name"],
             r["status"],
             snapshot.get("snapshot_time") or "",
