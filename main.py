@@ -3776,7 +3776,7 @@ async def _attendance_autoscan_loop():
                         
                         # Upsert in die Tabelle (inkl. Datumskopf + Slot in Spalte B)
                         ok = await _att_sheets_upsert_block(
-                            session_key=skey,
+                            session_key=key,
                             date_label=date_label,
                             slot_time_label=slot_label,   # <— WICHTIG: jetzt wird Spalte B korrekt
                             user_rows=user_rows,
