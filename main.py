@@ -298,7 +298,13 @@ def _try_import_gs():
     except Exception:
         return None, None
 
+# --- NEU am Modulanfang ---
+_GS_CACHE: tuple | None = None
+
 def _gs_open_or_none():
+    global _GS_CACHE
+    if _GS_CACHE is not None:
+        return _GS_CACHE
     if not GSHEETS_KEYFILE.exists():
         return None
     gspread, Credentials = _try_import_gs()
@@ -308,19 +314,23 @@ def _gs_open_or_none():
     creds = Credentials.from_service_account_file(str(GSHEETS_KEYFILE), scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open(GSHEETS_SPREADSHEET_NAME)
+
     # Attendance sheet
     try:
         ws_data = sh.worksheet(GSHEETS_SHEET_TITLE)
     except Exception:
         ws_data = sh.add_worksheet(title=GSHEETS_SHEET_TITLE, rows=1000, cols=8)
         ws_data.append_row(["Date","SlotTime","User ID","Discord Name","Status","Snapshot Time","Note"])
+
     # Log sheet
     try:
         ws_log = sh.worksheet(GSHEETS_LOG_TITLE)
     except Exception:
         ws_log = sh.add_worksheet(title=GSHEETS_LOG_TITLE, rows=1000, cols=6)
         ws_log.append_row(["When","Guild","Channel","MessageID","Level","Message"])
-    return ws_data, ws_log
+
+    _GS_CACHE = (ws_data, ws_log)
+    return _GS_CACHE
 
 def _ws_data_or_none():
     out = _gs_open_or_none()
@@ -329,13 +339,22 @@ def _ws_data_or_none():
     ws_data, _ = out
     return ws_data
 
-import asyncio
+_GS_SEM = asyncio.Semaphore(5)   # max. 5 gleichzeitige Worker
+_GS_MIN_INTERVAL = 0.12          # ~8-9 calls/sek. -> ~540/min
+_GS_LAST_TS = 0.0
 
 async def _gs_call(ws, method: str, *args, **kwargs):
-    """führt einen blockierenden gspread-Methodenaufruf im Thread aus."""
-    func = getattr(ws, method)
-    return await asyncio.to_thread(func, *args, **kwargs)
-
+    """führt einen blockierenden gspread-Methodenaufruf im Thread aus, mit Throttle."""
+    global _GS_LAST_TS
+    async with _GS_SEM:
+        # sanftes Intervall zwischen Calls
+        now = time.monotonic()
+        wait = _GS_MIN_INTERVAL - (now - _GS_LAST_TS)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _GS_LAST_TS = time.monotonic()
+        func = getattr(ws, method)
+        return await asyncio.to_thread(func, *args, **kwargs)
 
 def _sheet_format_header(ws, row: int, finalized: bool):
     # grün (interim) / rot (final) + fett
@@ -489,31 +508,26 @@ async def _att_sheets_upsert_block(
         if (getattr(cell_b, "value", "") or "") != (slot_time_label or ""):
             await _gs_call(ws_data, "update_cell", header_row, 2, (slot_time_label or ""))
     
-    # 2) Block-Grenzen bestimmen
+    # 2) Block-Grenzen bestimmen (ohne cell()-Loops)
     block_start = header_row + 1
     block_end = block_start - 1
-    row = block_start
     
-    def _looks_like_header(a_val: str) -> bool:
-        return bool(DATE_RX.match(a_val.strip()))
+    # Lies einen großzügigen Bereich ab block_start (z.B. 500 Zeilen)
+    max_scan = block_start + 500
+    rows = await _gs_call(ws_data, "get", f"A{block_start}:E{max_scan}")
+    # rows ist Liste von Zeilen (je eine Liste mit bis zu 5 Werten)
     
-    while True:
-        # Zellen A..E dieser Zeile lesen
-        a = (await _gs_call(ws_data, "cell", row, 1)).value or ""
-        b = (await _gs_call(ws_data, "cell", row, 2)).value or ""
-        c = (await _gs_call(ws_data, "cell", row, 3)).value or ""
-        d = (await _gs_call(ws_data, "cell", row, 4)).value or ""
-        e = (await _gs_call(ws_data, "cell", row, 5)).value or ""
-    
-        # leer -> Block fertig
+    for offset, row_vals in enumerate(rows, start=block_start):
+        a = (row_vals[0] if len(row_vals) > 0 else "").strip()
+        b = (row_vals[1] if len(row_vals) > 1 else "").strip()
+        c = (row_vals[2] if len(row_vals) > 2 else "").strip()
+        d = (row_vals[3] if len(row_vals) > 3 else "").strip()
+        e = (row_vals[4] if len(row_vals) > 4 else "").strip()
         if not any((a, b, c, d, e)):
             break
-        # nächster Header -> Block fertig
-        if _looks_like_header(a) and row != block_start:
+        if DATE_RX.match(a) and offset != block_start:
             break
-    
-        block_end = row
-        row += 1
+        block_end = offset
     
     # 3) Vorhandene User im Block
     existing_by_uid: dict[int, tuple[int, str, str]] = {}  # uid -> (row_idx, name, status)
@@ -631,19 +645,47 @@ def _att_sheets_append_raw(rows: list[list[str]]) -> bool:
     ws_data.append_rows(rows, value_input_option="RAW")
     return True
 
-def _att_sheets_log(guild: discord.Guild, channel: discord.abc.GuildChannel, message_id: int, level: str, text: str):
-    out = _gs_open_or_none()
-    if not out:
+# --- NEU am Modulanfang ---
+_LOG_BUFFER: list[list[str]] = []
+_LOG_FLUSH_RUNNING = False
+
+async def _flush_logs_periodically():
+    global _LOG_FLUSH_RUNNING, _LOG_BUFFER
+    if _LOG_FLUSH_RUNNING:
         return
-    _, ws_log = out
-    ws_log.append_row([
+    _LOG_FLUSH_RUNNING = True
+    try:
+        while True:
+            await asyncio.sleep(2)  # alle 2s bündeln
+            buf, _LOG_BUFFER = _LOG_BUFFER, []
+            if not buf:
+                continue
+            out = _gs_open_or_none()
+            if not out:
+                continue
+            _, ws_log = out
+            try:
+                await _gs_call(ws_log, "append_rows", buf, value_input_option="RAW")
+            except Exception:
+                # optional: bei Fehlern nicht alles verlieren
+                _LOG_BUFFER[:0] = buf
+    finally:
+        _LOG_FLUSH_RUNNING = False
+
+def _att_sheets_log(guild: discord.Guild, channel: discord.abc.GuildChannel, message_id: int, level: str, text: str):
+    # nur puffern; flush-Task sicherstellen
+    row = [
         datetime.now(timezone.utc).isoformat(),
         f"{guild.name} ({guild.id})",
         f"{getattr(channel, 'name', '?')} ({getattr(channel, 'id', '?')})",
         str(message_id),
         level,
         text,
-    ])
+    ]
+    _LOG_BUFFER.append(row)
+    if not _LOG_FLUSH_RUNNING:
+        asyncio.create_task(_flush_logs_periodically())
+
 
 def _roster_now(guild: discord.Guild, roles: dict[str, Optional[int]], blacklist: set[int]) -> set[int]:
     caster_id = roles.get("Caster"); ref_id = roles.get("Referee")
