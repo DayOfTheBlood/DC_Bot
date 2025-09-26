@@ -516,8 +516,31 @@ async def _att_sheets_upsert_block(
         row += 1
     
     # 3) Vorhandene User im Block
+    existing_by_uid: dict[int, tuple[int, str, str]] = {}  # uid -> (row_idx, name, status)
     if block_end >= block_start:
-        existing_ids = await _gs_call(ws_data, "get", f"B{block_start}:B{block_end}")
+        rows = await _gs_call(ws_data, "get", f"A{block_start}:C{block_end}")
+        for idx, row_vals in enumerate(rows, start=block_start):
+            name = (row_vals[0] if len(row_vals) > 0 else "").strip()
+            uid_s = (row_vals[1] if len(row_vals) > 1 else "").strip()
+            status = (row_vals[2] if len(row_vals) > 2 else "").strip()
+            try:
+                uid = int(uid_s)
+            except Exception:
+                continue
+            existing_by_uid[uid] = (idx, name, status)
+    
+    # 4) Upsert-Plan bauen
+    updates: list[tuple[int, list]] = []   # (row_idx, [name, uid, status])
+    adds: list[list] = []                  # [[name, uid, status, note], ...]
+    
+    for name, uid, st in new_users:
+        if uid in existing_by_uid:
+            row_idx, old_name, old_st = existing_by_uid[uid]
+            if old_name != name or old_st != st:
+                updates.append((row_idx, [name, uid, st]))
+        else:
+            adds.append([name, uid, st, ""])
+
     
     # 5) Neue User einfügen
     if adds:
