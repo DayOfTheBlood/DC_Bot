@@ -379,7 +379,7 @@ def _sheet_read_block(ws, start: int, height: int) -> tuple[dict[str, str], list
     return id_to_note, order
 
 async def _att_sheets_upsert_block(
-    session_key: str,
+    session_key=skey,
     date_label: str,             # 'YYYY-MM-DD'
     slot_time_label: str,        # 'HH:MM' (CET) oder ''
     user_rows: list[tuple[str, int, str]],  # [(display_name, user_id, status)]
