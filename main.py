@@ -170,7 +170,7 @@ def _att_backfill_sheets() -> int:
     """Exportiert alle finalisierten Sessions, die noch kein 'exported'=True haben."""
     count = 0
     finals = attendance_store.get("finalized", {})
-    for skey, entry in list(finals.items()):
+    for key, entry in list(finals.items()):
         if entry.get("exported"):
             continue
         snapshot = entry.get("snapshot") or {}
@@ -379,7 +379,7 @@ def _sheet_read_block(ws, start: int, height: int) -> tuple[dict[str, str], list
     return id_to_note, order
 
 async def _att_sheets_upsert_block(
-    session_key=skey,
+    session_key: str,
     date_label: str,             # 'YYYY-MM-DD'
     slot_time_label: str,        # 'HH:MM' (CET) oder ''
     user_rows: list[tuple[str, int, str]],  # [(display_name, user_id, status)]
