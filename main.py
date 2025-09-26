@@ -3232,12 +3232,6 @@ async def status_cmd(ctx: commands.Context, *, team_name: str | None = None):
 
     await ctx.send(embed=emb)
 
-
-
-
-
-
-
 async def _att_scan_channel(
     guild: discord.Guild,
     channel: discord.TextChannel,
@@ -3432,7 +3426,7 @@ async def _att_scan_channel(
                         pass
                 
                 await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=anchor_ymd,      # <- statt date_label
                     slot_time_label=slot_label,
                     user_rows=live_rows,        # <- statt user_rows
@@ -3458,7 +3452,7 @@ async def _att_scan_channel(
                             status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
                         live_rows.append((name, uid, status))
                     await _att_sheets_upsert_block(
-                        session_key=skey,
+                        session_key=key,
                         date_label=anchor_ymd,      # <- statt date_label
                         slot_time_label=slot_label,
                         user_rows=live_rows,        # <- statt user_rows
@@ -3530,7 +3524,7 @@ async def _att_scan_channel(
             try:
                 user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
                 await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=anchor_ymd,      # <- statt date_label
                     slot_time_label=slot_label,
                     user_rows=live_rows,        # <- statt user_rows
@@ -3553,7 +3547,7 @@ async def _att_scan_channel(
                         pass
                     
                 ok = await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=anchor_ymd,      # <- statt date_label
                     slot_time_label=slot_label,
                     user_rows=live_rows,        # <- statt user_rows
@@ -3577,7 +3571,7 @@ async def _att_scan_channel(
                 for r in rows:
                     final_rows.append((r["display_name"], r["user_id"], r["status"]))
                 await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=anchor_ymd,      # <- statt date_label
                     slot_time_label=slot_label,
                     user_rows=live_rows,        # <- statt user_rows
