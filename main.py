@@ -3425,7 +3425,13 @@ async def _att_scan_channel(
                         else:
                             status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
                         live_rows.append((name, uid, status))
-                    await _att_sheets_upsert_block(key, anchor_ymd, live_rows, finalized=False)
+                    await _att_sheets_upsert_block(
+                        session_key=skey,
+                        date_label=anchor_ymd,
+                        slot_time_label=slot_label,   # siehe Fix 2 unten
+                        user_rows=live_rows,
+                        finalized=False,
+                    )
                 except Exception as e:
                     if not silent:
                         warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
@@ -3492,7 +3498,7 @@ async def _att_scan_channel(
             try:
                 user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
                 await _att_sheets_upsert_block(
-                    session_key=key,
+                    session_key=skey,
                     date_label=anchor_ymd,
                     slot_time_label=(slot_dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M") if slot_dt else ""),
                     user_rows=user_rows_simple,
@@ -3538,7 +3544,13 @@ async def _att_scan_channel(
                 final_rows = []
                 for r in rows:
                     final_rows.append((r["display_name"], r["user_id"], r["status"]))
-                await _att_sheets_upsert_block(key, anchor_ymd, final_rows, finalized=True)
+                await _att_sheets_upsert_block(
+                    session_key=skey,
+                    date_label=anchor_ymd,
+                    slot_time_label=slot_label,   # siehe Fix 2 unten
+                    user_rows=live_rows,
+                    finalized=False,
+                )
                 _att_sheets_mark_finalized(key)
             except Exception as e:
                 if not silent:
