@@ -384,7 +384,7 @@ async def _att_sheets_upsert_block(
     slot_time_label: str,        # 'HH:MM' (CET) oder ''
     user_rows: list[tuple[str, int, str]],  # [(display_name, user_id, status)]
     finalized: bool
-) -> None:
+) -> bool:
     """
     Pro Game genau EIN Header:
       A: Datum (YYYY-MM-DD)
@@ -419,6 +419,16 @@ async def _att_sheets_upsert_block(
             })
         except Exception:
             pass
+
+    def _color_for_status(status: str | None) -> dict:
+        s = (status or "").upper()
+        if s in ("C", "R", "C+R"):
+            return {"red": 1.0, "green": 1.0, "blue": 0.05}   # gelb
+        if s == "X":
+            return {"red": 1.0, "green": 0.30, "blue": 0.05}  # orange
+        if s == "NR":
+            return {"red": 0.7, "green": 0.01, "blue": 0.01}  # dunkelrot
+        return {"red": 1, "green": 1, "blue": 1}              # weiß
 
     def _format_users_plain(r1: int, r2: int):
         if r2 >= r1:
@@ -510,6 +520,7 @@ async def _att_sheets_upsert_block(
         "backgroundColor": ({"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}),
         "textFormat": {"bold": True}
     })
+    return True
 
 def _att_sheets_mark_finalized(session_key: str):
     ws = _ws_data_or_none()
