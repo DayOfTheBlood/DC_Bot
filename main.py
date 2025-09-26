@@ -115,7 +115,7 @@ tiebreaker_picked = {}
 _match_index: dict[int, dict[int, datetime]] = {}
 
 ATTENDANCE_CHANNEL_IDS: set[int] = {
-    1194231270851477544,
+    1409588956437418010,
 }
 # Custom-Emoji-IDs (IDs sind stabiler als Namen). Falls du die IDs noch nicht hast,
 # setze hier 0 und der Bot versucht per Name-Fallback ("r_letter_c", "r_letter_r", "r_cross03").
