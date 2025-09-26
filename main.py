@@ -490,11 +490,30 @@ async def _att_sheets_upsert_block(
             await _gs_call(ws_data, "update_cell", header_row, 2, (slot_time_label or ""))
     
     # 2) Block-Grenzen bestimmen
-    colA = await _gs_call(ws_data, "col_values", 1)
-    colB = await _gs_call(ws_data, "col_values", 2)
-    # ... in der Schleife:
-    if a or b or any(((await _gs_call(ws_data, "cell", i, c)).value or "").strip() for c in (3,4,5)):
-        block_end = i
+    block_start = header_row + 1
+    block_end = block_start - 1
+    row = block_start
+    
+    def _looks_like_header(a_val: str) -> bool:
+        return bool(DATE_RX.match(a_val.strip()))
+    
+    while True:
+        # Zellen A..E dieser Zeile lesen
+        a = (await _gs_call(ws_data, "cell", row, 1)).value or ""
+        b = (await _gs_call(ws_data, "cell", row, 2)).value or ""
+        c = (await _gs_call(ws_data, "cell", row, 3)).value or ""
+        d = (await _gs_call(ws_data, "cell", row, 4)).value or ""
+        e = (await _gs_call(ws_data, "cell", row, 5)).value or ""
+    
+        # leer -> Block fertig
+        if not any((a, b, c, d, e)):
+            break
+        # nächster Header -> Block fertig
+        if _looks_like_header(a) and row != block_start:
+            break
+    
+        block_end = row
+        row += 1
     
     # 3) Vorhandene User im Block
     if block_end >= block_start:
