@@ -3400,7 +3400,7 @@ async def _att_scan_channel(
                         pass
                 
                 await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=date_label,
                     slot_time_label=slot_label,
                     user_rows=user_rows,
@@ -3426,7 +3426,7 @@ async def _att_scan_channel(
                             status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
                         live_rows.append((name, uid, status))
                     await _att_sheets_upsert_block(
-                        session_key=skey,
+                        session_key=key,
                         date_label=anchor_ymd,
                         slot_time_label=slot_label,   # siehe Fix 2 unten
                         user_rows=live_rows,
@@ -3498,7 +3498,7 @@ async def _att_scan_channel(
             try:
                 user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
                 await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=anchor_ymd,
                     slot_time_label=(slot_dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M") if slot_dt else ""),
                     user_rows=user_rows_simple,
@@ -3521,7 +3521,7 @@ async def _att_scan_channel(
                         pass
                     
                 ok = await _att_sheets_upsert_block(
-                    session_key=skey,
+                    session_key=key,
                     date_label=date_label,
                     slot_time_label=slot_label,     # <--- WICHTIG
                     user_rows=user_rows,
