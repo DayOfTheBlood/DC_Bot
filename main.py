@@ -469,10 +469,21 @@ async def _att_sheets_upsert_block(
     colA = await _gs_call(ws_data, "col_values", 1)
     colB = await _gs_call(ws_data, "col_values", 2)
     
+    header_row = None
+    for i in range(START_ROW, max(len(colA), len(colB)) + 1):
+        a = (colA[i-1] if i-1 < len(colA) else "").strip()
+        b = (colB[i-1] if i-1 < len(colB) else "").strip()
+        if a == date_label and b == (slot_time_label or ""):
+            header_row = i
+            break
+    
     if header_row is None:
         await _gs_call(ws_data, "insert_row", ["", "", "", ""], index=START_ROW)
         header_row = START_ROW
-        await _gs_call(ws_data, "update", f"A{header_row}:B{header_row}", [[date_label, slot_time_label or ""]])
+        await _gs_call(
+            ws_data, "update", f"A{header_row}:B{header_row}",
+            [[date_label, slot_time_label or ""]], value_input_option="RAW"
+        )
     else:
         cell_b = await _gs_call(ws_data, "cell", header_row, 2)
         if (getattr(cell_b, "value", "") or "") != (slot_time_label or ""):
