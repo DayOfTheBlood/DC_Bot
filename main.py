@@ -3325,7 +3325,7 @@ async def _att_scan_channel(
                     live_rows.append((dname, uid, st))
         
                 # Live upsert (grün) – aber nur solange NICHT final
-                _att_sheets_upsert_block(
+                await _att_sheets_upsert_block(
                     session_key=key,
                     date_label=anchor_ymd,
                     slot_time_label=slot_label,
@@ -3350,7 +3350,7 @@ async def _att_scan_channel(
                         else:
                             status = "C+R" if (c and r) else ("C" if c else ("R" if r else "NR"))
                         live_rows.append((name, uid, status))
-                    _att_sheets_upsert_block(key, anchor_ymd, live_rows, finalized=False)
+                    await _att_sheets_upsert_block(key, anchor_ymd, live_rows, finalized=False)
                 except Exception as e:
                     if not silent:
                         warnings.append(f"Sheet (interim) fehlgeschlagen für Game {gm.id}: {e}")
@@ -3416,7 +3416,7 @@ async def _att_scan_channel(
             # Header/Block im Sheet jetzt als FINAL neu färben/setzen (ROT):
             try:
                 user_rows_simple = [(r["display_name"], r["user_id"], r["status"]) for r in rows]
-                _att_sheets_upsert_block(
+                await _att_sheets_upsert_block(
                     session_key=key,
                     date_label=anchor_ymd,
                     slot_time_label=(slot_dt.astimezone(ATTENDANCE_TZ).strftime("%H:%M") if slot_dt else ""),
@@ -3439,7 +3439,7 @@ async def _att_scan_channel(
                     except Exception:
                         pass
                     
-                ok = _att_sheets_upsert_block(
+                ok = await _att_sheets_upsert_block(
                     session_key=skey,
                     date_label=date_label,
                     slot_time_label=slot_label,     # <--- WICHTIG
@@ -3463,7 +3463,7 @@ async def _att_scan_channel(
                 final_rows = []
                 for r in rows:
                     final_rows.append((r["display_name"], r["user_id"], r["status"]))
-                _att_sheets_upsert_block(key, anchor_ymd, final_rows, finalized=True)
+                await _att_sheets_upsert_block(key, anchor_ymd, final_rows, finalized=True)
                 _att_sheets_mark_finalized(key)
             except Exception as e:
                 if not silent:
@@ -3688,7 +3688,7 @@ async def _attendance_autoscan_loop():
                                 pass
                         
                         # Upsert in die Tabelle (inkl. Datumskopf + Slot in Spalte B)
-                        ok = _att_sheets_upsert_block(
+                        ok = await _att_sheets_upsert_block(
                             session_key=skey,
                             date_label=date_label,
                             slot_time_label=slot_label,   # <— WICHTIG: jetzt wird Spalte B korrekt
@@ -3876,7 +3876,7 @@ async def _attendance_startup_catchup_once():
                     is_final = bool(ses.get("frozen")) or skey in finals
                     date_label = ses.get("anchor_date") or ""
                     if date_label:
-                        _att_sheets_upsert_block(
+                        await _att_sheets_upsert_block(
                             session_key=skey,
                             date_label=date_label,
                             user_rows=user_rows,
