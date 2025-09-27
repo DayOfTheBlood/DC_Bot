@@ -432,6 +432,7 @@ async def _att_sheets_upsert_block(
     START_ROW = 10
     DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     TIME_RX = re.compile(r"^\d{2}:\d{2}$")
+    _GS_UPSERT_LOCK = asyncio.Lock()
 
     # ---------- Format-Helper ----------
     def _format_header(row: int, is_final: bool):
@@ -489,134 +490,134 @@ async def _att_sheets_upsert_block(
     new_users = list(dedup.values())
     new_users.sort(key=lambda x: x[0].casefold())
 
-    # 1) Header finden/erstellen  (E=SessionKey ist Primärschlüssel)
-    colA = await _gs_call(ws_data, "col_values", 1)
-    colB = await _gs_call(ws_data, "col_values", 2)
-    colE = await _gs_call(ws_data, "col_values", 5)  # <-- NEU
-
-    header_row = None
-
-    # a) Primär: exakten Header über SessionKey in E finden
-    for i in range(START_ROW, max(len(colA), len(colB), len(colE)) + 1):
-        e = (colE[i-1] if i-1 < len(colE) else "").strip()
-        if e == session_key:
-            header_row = i
-            break
-
-    # b) Fallback: alter Modus (A/B) – nur falls E noch nicht gesetzt (Alt-Bestand)
-    if header_row is None:
-        for i in range(START_ROW, max(len(colA), len(colB)) + 1):
-            a = (colA[i-1] if i-1 < len(colA) else "").strip()
-            b = (colB[i-1] if i-1 < len(colB) else "").strip()
-            if a == date_label and b == (slot_time_label or ""):
+    async with _GS_UPSERT_LOCK:
+        # 1) Header finden/erstellen – E=SessionKey ist Primärschlüssel
+        colA = await _gs_call(ws_data, "col_values", 1)
+        colB = await _gs_call(ws_data, "col_values", 2)
+        colE = await _gs_call(ws_data, "col_values", 5)
+    
+        header_row = None
+    
+        # a) Primär: exakten Header über SessionKey in E finden
+        for i in range(START_ROW, max(len(colA), len(colB), len(colE)) + 1):
+            e = (colE[i-1] if i-1 < len(colE) else "").strip()
+            if e == session_key:
                 header_row = i
                 break
-
-    if header_row is None:
-        # neuen Header am START_ROW anlegen
-        await _gs_call(ws_data, "insert_row", ["", "", "", ""], index=START_ROW)
-        header_row = START_ROW
-        # andere gespeicherte Blöcke verschieben
-        _sheet_shift_indices(START_ROW, +1)
-        # A..E in einem Rutsch schreiben: [Date, Time, "", "", SessionKey]
-        await _gs_call(
-            ws_data, "update", f"A{header_row}:E{header_row}",
-            [[date_label, (slot_time_label or ""), "", "", session_key]],
-            value_input_option="RAW"
-        )
-    else:
-        # Bestehenden Header ggf. korrigieren (A/B drift)
-        cell_b = await _gs_call(ws_data, "cell", header_row, 2)
-        if (getattr(cell_b, "value", "") or "") != (slot_time_label or ""):
-            await _gs_call(ws_data, "update_cell", header_row, 2, (slot_time_label or ""))
-        # sicherstellen, dass E=SessionKey gesetzt ist
-        cell_e = await _gs_call(ws_data, "cell", header_row, 5)
-        if (getattr(cell_e, "value", "") or "") != session_key:
-            await _gs_call(ws_data, "update_cell", header_row, 5, session_key)
     
-    # 2) Block-Grenzen bestimmen (ohne cell()-Loops)
-    block_start = header_row + 1
-    block_end = block_start - 1
-    
-    # Lies einen großzügigen Bereich ab block_start (z.B. 500 Zeilen)
-    max_scan = block_start + 500
-    rows = await _gs_call(ws_data, "get", f"A{block_start}:E{max_scan}")
-    # rows ist Liste von Zeilen (je eine Liste mit bis zu 5 Werten)
-    
-    for offset, row_vals in enumerate(rows, start=block_start):
-        a = (row_vals[0] if len(row_vals) > 0 else "").strip()
-        b = (row_vals[1] if len(row_vals) > 1 else "").strip()
-        c = (row_vals[2] if len(row_vals) > 2 else "").strip()
-        d = (row_vals[3] if len(row_vals) > 3 else "").strip()
-        e = (row_vals[4] if len(row_vals) > 4 else "").strip()
-        if not any((a, b, c, d, e)):
-            break
-        if DATE_RX.match(a) and offset != block_start:
-            break
-        block_end = offset
-    
-    # 3) Vorhandene User im Block
-    existing_by_uid: dict[int, tuple[int, str, str]] = {}  # uid -> (row_idx, name, status)
-    if block_end >= block_start:
-        rows = await _gs_call(ws_data, "get", f"A{block_start}:C{block_end}")
-        for idx, row_vals in enumerate(rows, start=block_start):
-            name = (row_vals[0] if len(row_vals) > 0 else "").strip()
-            uid_s = (row_vals[1] if len(row_vals) > 1 else "").strip()
-            status = (row_vals[2] if len(row_vals) > 2 else "").strip()
-            try:
-                uid = int(uid_s)
-            except Exception:
-                continue
-            existing_by_uid[uid] = (idx, name, status)
-    
-    # 4) Upsert-Plan bauen
-    updates: list[tuple[int, list]] = []   # (row_idx, [name, uid, status])
-    adds: list[list] = []                  # [[name, uid, status, note], ...]
-    
-    for name, uid, st in new_users:
-        if uid in existing_by_uid:
-            row_idx, old_name, old_st = existing_by_uid[uid]
-            if old_name != name or old_st != st:
-                updates.append((row_idx, [name, f"'{uid}", st]))
+        if header_row is None:
+            # b) Kein Header vorhanden -> neuen Header am ENDE anhängen (nicht oben einfügen!)
+            last_used = max(len(colA), len(colB), len(colE), START_ROW - 1)
+            header_row = last_used + 1
+            # A..E in einem Rutsch schreiben
+            await _gs_call(
+                ws_data, "update", f"A{header_row}:E{header_row}",
+                [[date_label, (slot_time_label or ""), "", "", session_key]],
+                value_input_option="RAW"
+            )
         else:
-            adds.append([name, f"'{uid}", st, ""])
-    
-    # 5) Neue User einfügen
-    if adds:
-        insert_at = (block_end + 1) if block_end >= block_start else block_start
-        await _gs_call(ws_data, "insert_rows", [["", "", "", ""] for _ in range(len(adds))], row=insert_at)
-        _sheet_shift_indices(insert_at, len(adds))
-        await _gs_call(ws_data, "update", f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
-        await _gs_call(ws_data, "format", f"A{insert_at}:E{insert_at + len(adds) - 1}", {
-            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
-            "textFormat": {"bold": False}
-        })
-        # Zeilen einfärben (Status)
-        for offset, row_vals in enumerate(adds):
-            st = row_vals[2]
-            await _gs_call(ws_data, "format", f"C{insert_at + offset}:C{insert_at + offset}", {
-                "backgroundColor": _color_for_status(st), "textFormat": {"bold": False}
+            # Bestehenden Header ggf. korrigieren (A/B drift) + E sicherstellen
+            cell_b = await _gs_call(ws_data, "cell", header_row, 2)
+            if (getattr(cell_b, "value", "") or "") != (slot_time_label or ""):
+                await _gs_call(ws_data, "update_cell", header_row, 2, (slot_time_label or ""))
+            cell_e = await _gs_call(ws_data, "cell", header_row, 5)
+            if (getattr(cell_e, "value", "") or "") != session_key:
+                await _gs_call(ws_data, "update_cell", header_row, 5, session_key)
+        
+            # 2) Block-Grenzen bestimmen – Spalte E markiert Header
+            block_start = header_row + 1
+            block_end = block_start - 1
+            
+            # großzügigen Bereich ab block_start holen (ein Read statt viele cell()-Reads)
+            SCAN_LEN = 600   # reicht komfortabel; bei sehr langen Blöcken ggf. erhöhen
+            rng = f"A{block_start}:E{block_start + SCAN_LEN}"
+            rows = await _gs_call(ws_data, "get", rng)  # Liste[List[str]]
+            
+            for i, row_vals in enumerate(rows, start=block_start):
+                a = (row_vals[0] if len(row_vals) > 0 else "").strip()
+                b = (row_vals[1] if len(row_vals) > 1 else "").strip()
+                c = (row_vals[2] if len(row_vals) > 2 else "").strip()
+                d = (row_vals[3] if len(row_vals) > 3 else "").strip()
+                e = (row_vals[4] if len(row_vals) > 4 else "").strip()
+            
+                # komplett leere Zeile -> Block Ende
+                if not any((a, b, c, d, e)):
+                    break
+            
+                # nächste Header-Zeile beginnt (E ist gesetzt) -> jetziger Block endet davor
+                if e:
+                    break
+            
+                block_end = i
+            
+            # Wenn der Block leer ist, bleibt block_end < block_start (das ist okay)
+        
+        # 3) Vorhandene User im Block
+        existing_by_uid: dict[int, tuple[int, str, str]] = {}  # uid -> (row_idx, name, status)
+        if block_end >= block_start:
+            rows = await _gs_call(ws_data, "get", f"A{block_start}:C{block_end}")
+            for idx, row_vals in enumerate(rows, start=block_start):
+                name = (row_vals[0] if len(row_vals) > 0 else "").strip()
+                uid_s = (row_vals[1] if len(row_vals) > 1 else "").strip()
+                status = (row_vals[2] if len(row_vals) > 2 else "").strip()
+                try:
+                    uid = int(uid_s)
+                except Exception:
+                    continue
+                existing_by_uid[uid] = (idx, name, status)
+        
+        # 4) Upsert-Plan bauen
+        updates: list[tuple[int, list]] = []   # (row_idx, [name, uid, status])
+        adds: list[list] = []                  # [[name, uid, status, note], ...]
+        
+        for name, uid, st in new_users:
+            if uid in existing_by_uid:
+                row_idx, old_name, old_st = existing_by_uid[uid]
+                if old_name != name or old_st != st:
+                    updates.append((row_idx, [name, f"'{uid}", st]))
+            else:
+                adds.append([name, f"'{uid}", st, ""])
+        
+        # 5) Neue User einfügen
+        if adds:
+            insert_at = (block_end + 1) if block_end >= block_start else block_start
+            await _gs_call(ws_data, "insert_rows", [["", "", "", ""] for _ in range(len(adds))], row=insert_at)
+            _sheet_shift_indices(insert_at, len(adds))
+            block_end = insert_at + len(adds) - 1
+            await _gs_call(ws_data, "update", f"A{insert_at}:D{insert_at + len(adds) - 1}", adds, value_input_option="RAW")
+            await _gs_call(ws_data, "format", f"A{insert_at}:E{insert_at + len(adds) - 1}", {
+                "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                "textFormat": {"bold": False}
             })
-    
-    # 6) Updates
-    for row_idx, vals in updates:
-        try:
-            await _gs_call(ws_data, "update", range_name=f"A{row_idx}:C{row_idx}", values=[vals], value_input_option="RAW")
-        except Exception:
-            pass
-        await _gs_call(ws_data, "format", f"C{row_idx}:C{row_idx}", {
-            "backgroundColor": _color_for_status(vals[2]), "textFormat": {"bold": False}
+            # Zeilen einfärben (Status)
+            for offset, row_vals in enumerate(adds):
+                st = row_vals[2]
+                await _gs_call(ws_data, "format", f"C{insert_at + offset}:C{insert_at + offset}", {
+                    "backgroundColor": _color_for_status(st), "textFormat": {"bold": False}
+                })
+        
+        # 6) Updates
+        for row_idx, vals in updates:
+            try:
+                await _gs_call(ws_data, "update", range_name=f"A{row_idx}:C{row_idx}", values=[vals], value_input_option="RAW")
+            except Exception:
+                pass
+            await _gs_call(ws_data, "format", f"C{row_idx}:C{row_idx}", {
+                "backgroundColor": _color_for_status(vals[2]), "textFormat": {"bold": False}
+            })
+        
+        # 7) Header formatieren
+        await _gs_call(ws_data, "format", f"A{header_row}:E{header_row}", {
+            "backgroundColor": ({"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}),
+            "textFormat": {"bold": True}
         })
-    
-    # 7) Header formatieren
-    await _gs_call(ws_data, "format", f"A{header_row}:E{header_row}", {
-        "backgroundColor": ({"red": 0.9, "green": 0.2, "blue": 0.2} if finalized else {"red": 0.0, "green": 0.8, "blue": 0.0}),
-        "textFormat": {"bold": True}
-    })
     # --- Store aktualisieren: Start/Height/Final-Flag
     total_height = 1 + max(0, (block_end - block_start + 1))
-    blk = {"start": int(header_row), "height": int(total_height), "finalized": bool(finalized)}
-    attendance_store.setdefault("sheet_blocks", {})[session_key] = blk
+    attendance_store.setdefault("sheet_blocks", {})[session_key] = {
+        "start": int(header_row),
+        "height": int(total_height),
+        "finalized": bool(finalized),
+    }
     _attendance_save_store()
     return True
 
